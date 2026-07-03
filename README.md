@@ -1,5 +1,5 @@
 <h2>Fixed tunnel</h2>
-🚀 
+
 
 ```bash
 VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Vless_Argo/main/Vless_Argo.sh)
@@ -8,7 +8,7 @@ VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls ht
 > 
 
 <h2>Temporary tunnel</h2>
-🚀
+
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Vless_Argo/main/Vless_Argo.sh)
