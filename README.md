@@ -7,11 +7,11 @@ VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls ht
 
 > 
 
-<h2>临时隧道</h2>
-# 🚀 一键安装
+<h2>Temporary tunnel</h2>
+🚀
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Vless_Argo/main/Vless_Argo.sh)
 ```
 
-> 点击代码块右上角 **Copy** 即可复制完整命令。
+> 
