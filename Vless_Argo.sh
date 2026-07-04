@@ -2,6 +2,7 @@
 # ===================================================================
 # 通用 VLESS+WS+Argo 一键部署脚本
 # 兼容: Serv00/CT8 (共享主机, devil管理) 和 普通 Linux VPS (systemd/OpenRC管理)
+# 生命周期: install(默认) / re(改参数重装) / update(强制更新二进制并重启) / de(卸载清理) / status(查看状态)
 # ===================================================================
 
 # Alpine 默认不装 bash(默认 shell 是 busybox ash), 若被 sh 调用则自举切换到 bash
@@ -25,16 +26,18 @@ purple() { echo -e "\e[1;35m$1\033[0m"; }
 export LC_ALL=C
 
 # ---------------------------------------------------------------
-# 子命令解析: 不带参数=安装, re=用新的环境变量重新配置并重启, de=卸载并清理
+# 子命令解析
 # 用法示例:
-#   VLESS_PORT=8443 bash <(curl -Ls .../Vless_Argo.sh)         # 安装
-#   VLESS_PORT=9443 UUID=xxx bash <(curl -Ls .../Vless_Argo.sh) re   # 改参数重装
-#   bash <(curl -Ls .../Vless_Argo.sh) de                            # 卸载清理
+#   bash <(curl -Ls .../Vless_Argo.sh)                                       # 安装
+#   VLESS_PORT=9443 UUID=xxx bash <(curl -Ls .../Vless_Argo.sh) re           # 改参数重装(沿用未指定的旧配置)
+#   bash <(curl -Ls .../Vless_Argo.sh) update                                # 强制重新下载二进制并重启
+#   bash <(curl -Ls .../Vless_Argo.sh) status                                # 查看当前配置和运行状态
+#   bash <(curl -Ls .../Vless_Argo.sh) de                                    # 卸载并清理
 # ---------------------------------------------------------------
 ACTION="${1:-install}"
 case "$ACTION" in
-    install|re|de) ;;
-    *) red "未知参数: ${ACTION} (支持: 留空=安装, re=用新参数重装, de=卸载并清理)"; exit 1 ;;
+    install|re|update|de|status) ;;
+    *) red "未知参数: ${ACTION} (支持: 留空=安装, re=用新参数重装, update=强制更新二进制, status=查看状态, de=卸载并清理)"; exit 1 ;;
 esac
 
 # 下载工具探测: 优先 curl, 没有则用 wget(含 busybox wget, 用短参数保证兼容)
@@ -61,6 +64,33 @@ fetch_with_retry() {
     done
     red "下载失败,已重试 ${max_attempts} 次,放弃: ${url}"
     return 1
+}
+
+# 只删除脚本自己拼出来的固定路径,拒绝空值/根目录/HOME 这种明显危险的目标
+safe_rm() {
+    local target
+    for target in "$@"; do
+        case "$target" in
+            ""|"/"|"$HOME") yellow "safe_rm: 拒绝删除危险路径 [${target:-<空>}],已跳过"; continue ;;
+        esac
+        rm -rf -- "$target"
+    done
+}
+
+# 先礼后兵:普通 kill 给进程一点时间自行退出,超时仍未退出再 -9 强杀
+graceful_kill_pidfile() {
+    local pidfile="$1" pid i
+    [ -f "$pidfile" ] || return 0
+    pid=$(cat "$pidfile" 2>/dev/null)
+    [ -z "$pid" ] && return 0
+    if kill -0 "$pid" >/dev/null 2>&1; then
+        kill "$pid" >/dev/null 2>&1
+        for i in 1 2 3 4 5; do
+            kill -0 "$pid" >/dev/null 2>&1 || break
+            sleep 0.5
+        done
+        kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1
+    fi
 }
 
 # ---------------------------------------------------------------
@@ -91,22 +121,60 @@ if [ "$PLATFORM" = "vps" ]; then
         exit 1
     fi
 fi
-purple "检测到运行平台: ${PLATFORM}$( [ "$PLATFORM" = "vps" ] && echo " (init: ${INIT_SYSTEM})" )"
-[ "$ACTION" = "re" ] && purple "模式: 重新配置(沿用已下载的二进制,套用新的环境变量并重启服务)"
 
-# ---------------------------------------------------------------
-# 公共变量 / 环境变量
-# ---------------------------------------------------------------
 HOSTNAME=$(hostname)
 USERNAME=$(whoami | tr '[:upper:]' '[:lower:]')
-export UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo -n "$USERNAME+$HOSTNAME" | md5sum | head -c 32 | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')}
-export ARGO_DOMAIN=${ARGO_DOMAIN:-''}
-export ARGO_AUTH=${ARGO_AUTH:-''}
-export CFIP=${CFIP:-'saas.sin.fan'}
-export CFPORT=${CFPORT:-'443'}
-export SUB_TOKEN=${SUB_TOKEN:-${UUID:0:8}}
-# 仅 VPS 场景使用,serv00 端口由 devil 分配后覆盖
-export VLESS_PORT=${VLESS_PORT:-'443'}
+
+# ---------------------------------------------------------------
+# 路径规划(纯计算,不做任何创建/删除动作;所有子命令都需要先知道这些路径)
+# ---------------------------------------------------------------
+if [ "$PLATFORM" = "serv00" ]; then
+    if [[ "$HOSTNAME" =~ ct8 ]]; then
+        CURRENT_DOMAIN="ct8.pl"
+    elif [[ "$HOSTNAME" =~ hostuno ]]; then
+        CURRENT_DOMAIN="useruno.com"
+    else
+        CURRENT_DOMAIN="serv00.net"
+    fi
+    WORKDIR="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/logs"
+    FILE_PATH="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/public_html"
+    BIN_DIR="${HOME}/.vless_argo_bin"
+else
+    [ "$(id -u)" -ne 0 ] && { red "VPS 模式请使用 root 权限运行本脚本"; exit 1; }
+    WORKDIR="/var/log/xray-argo"
+    FILE_PATH="/var/www/xray-argo"
+    BIN_DIR="/etc/xray-argo"
+fi
+STATE_FILE="${BIN_DIR}/.vless_argo.env"
+
+# ---------------------------------------------------------------
+# 状态持久化: install 时保存本次生效的关键参数,re/update/status 时读取,
+# 用于实现"改参数重装时,没显式指定的项目沿用上次的值"而不是每次都退回硬编码默认值
+# ---------------------------------------------------------------
+load_state() {
+    [ -f "$STATE_FILE" ] || return 0
+    # shellcheck disable=SC1090
+    source "$STATE_FILE"
+}
+save_state() {
+    mkdir -p "$BIN_DIR"
+    cat > "$STATE_FILE" <<EOF
+SAVED_UUID=$(printf '%q' "$UUID")
+SAVED_PORT=$(printf '%q' "$PORT")
+SAVED_ARGO_DOMAIN=$(printf '%q' "$ARGO_DOMAIN")
+SAVED_ARGO_AUTH=$(printf '%q' "$ARGO_AUTH")
+SAVED_CFIP=$(printf '%q' "$CFIP")
+SAVED_CFPORT=$(printf '%q' "$CFPORT")
+SAVED_SUB_TOKEN=$(printf '%q' "$SUB_TOKEN")
+EOF
+}
+get_xray_version_string() {
+    if [ "$PLATFORM" = "vps" ] && [ -x "${BIN_DIR}/xray-core/xray" ]; then
+        "${BIN_DIR}/xray-core/xray" version 2>/dev/null | head -n1
+    else
+        echo "未知(serv00 使用的是第三方重命名二进制,不支持查询版本)"
+    fi
+}
 
 # ---------------------------------------------------------------
 # 卸载/清理(de 模式专用): 停服务、删配置、删站点,不做任何安装动作
@@ -115,20 +183,16 @@ do_uninstall() {
     purple "正在卸载 vless-argo 并清理相关文件..."
 
     if [ "$PLATFORM" = "serv00" ]; then
-        for pidfile in "${BIN_DIR}/web.pid" "${BIN_DIR}/bot.pid"; do
-            if [ -f "$pidfile" ]; then
-                old_pid=$(cat "$pidfile" 2>/dev/null)
-                [ -n "$old_pid" ] && kill -9 "$old_pid" >/dev/null 2>&1
-            fi
-        done
+        graceful_kill_pidfile "${BIN_DIR}/web.pid"
+        graceful_kill_pidfile "${BIN_DIR}/bot.pid"
         pkill -f "${BIN_DIR}/web" >/dev/null 2>&1
         pkill -f "${BIN_DIR}/bot" >/dev/null 2>&1
 
         devil www del "${USERNAME}.${CURRENT_DOMAIN}" >/dev/null 2>&1
         devil www del "keep.${USERNAME}.${CURRENT_DOMAIN}" >/dev/null 2>&1
 
-        rm -rf "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
-        rm -rf "$HOME/domains/keep.${USERNAME}.${CURRENT_DOMAIN}"
+        safe_rm "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
+        safe_rm "$HOME/domains/keep.${USERNAME}.${CURRENT_DOMAIN}"
 
         green "serv00/ct8 上的节点服务、保活服务及相关文件已清理完毕"
     else
@@ -145,55 +209,98 @@ do_uninstall() {
             rm -f /etc/init.d/xray-argo /etc/init.d/cloudflared-argo
         fi
 
-        rm -rf "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
+        safe_rm "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
         green "VPS 上的服务、配置文件和二进制已清理完毕"
     fi
 
     green "卸载完成"
 }
 
+if [ "$ACTION" = "de" ]; then
+    do_uninstall
+    exit 0
+fi
+
+# re/update/status 需要先读取上次保存的配置,作为未显式指定环境变量时的回退值
+if [ "$ACTION" = "re" ] || [ "$ACTION" = "update" ] || [ "$ACTION" = "status" ]; then
+    load_state
+fi
+# update = re + 强制重新下载二进制,复用同一套"沿用旧配置"的逻辑
+[ "$ACTION" = "update" ] && FORCE_REDOWNLOAD=1
+
 # ---------------------------------------------------------------
-# 目录规划(两个平台分别处理)
+# 公共变量 / 环境变量
+# 优先级: 本次显式传入的环境变量 > 上次安装保存的值(仅 re/update/status) > 硬编码默认值
+# ---------------------------------------------------------------
+export UUID=${UUID:-${SAVED_UUID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo -n "$USERNAME+$HOSTNAME" | md5sum | head -c 32 | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')}}
+export ARGO_DOMAIN=${ARGO_DOMAIN:-${SAVED_ARGO_DOMAIN:-''}}
+export ARGO_AUTH=${ARGO_AUTH:-${SAVED_ARGO_AUTH:-''}}
+export CFIP=${CFIP:-${SAVED_CFIP:-'saas.sin.fan'}}
+export CFPORT=${CFPORT:-${SAVED_CFPORT:-'443'}}
+export SUB_TOKEN=${SUB_TOKEN:-${SAVED_SUB_TOKEN:-${UUID:0:8}}}
+# 仅 VPS 场景使用,serv00 端口由 devil 分配后覆盖
+export VLESS_PORT=${VLESS_PORT:-${SAVED_PORT:-'443'}}
+
+# ---------------------------------------------------------------
+# status 模式: 只读查看,不改动任何东西
+# ---------------------------------------------------------------
+do_status() {
+    echo "===================== vless-argo 状态 ====================="
+    echo "平台         : ${PLATFORM}$( [ "$PLATFORM" = "vps" ] && echo " (init: ${INIT_SYSTEM})" )"
+    if [ ! -f "$STATE_FILE" ]; then
+        yellow "未找到安装记录(${STATE_FILE} 不存在),下面是本次会用到的默认值,不代表实际已部署的配置"
+    fi
+    echo "UUID         : ${UUID}"
+    echo "端口(PORT)   : ${SAVED_PORT:-${VLESS_PORT}}"
+    echo "ARGO_DOMAIN  : ${ARGO_DOMAIN:-<未设置,使用quick tunnel>}"
+    echo "ARGO_AUTH    : $([ -n "$ARGO_AUTH" ] && echo '已设置(内容不显示)' || echo '<未设置>')"
+    echo "Xray 版本     : $(get_xray_version_string)"
+    echo "---------------------------------------------------------------"
+    if [ "$PLATFORM" = "serv00" ]; then
+        for name in web bot; do
+            pidfile="${BIN_DIR}/${name}.pid"
+            if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile" 2>/dev/null)" >/dev/null 2>&1; then
+                green "${name}: 运行中 (PID $(cat "$pidfile"))"
+            else
+                red "${name}: 未运行"
+            fi
+        done
+        [ -f "${FILE_PATH}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_vless.log" ] && echo "订阅链接文件: https://${USERNAME}.${CURRENT_DOMAIN}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_vless.log"
+    else
+        if [ "$INIT_SYSTEM" = "systemd" ]; then
+            systemctl is-active --quiet xray-argo && green "xray-argo: 运行中" || red "xray-argo: 未运行"
+            systemctl is-active --quiet cloudflared-argo && green "cloudflared-argo: 运行中" || red "cloudflared-argo: 未运行"
+        elif [ "$INIT_SYSTEM" = "openrc" ]; then
+            rc-service xray-argo status 2>/dev/null | grep -q started && green "xray-argo: 运行中" || red "xray-argo: 未运行"
+            rc-service cloudflared-argo status 2>/dev/null | grep -q started && green "cloudflared-argo: 运行中" || red "cloudflared-argo: 未运行"
+        fi
+        [ -f "${FILE_PATH}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_vless.log" ] && echo "订阅文件: ${FILE_PATH}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_vless.log"
+    fi
+    echo "==============================================================="
+}
+
+if [ "$ACTION" = "status" ]; then
+    do_status
+    exit 0
+fi
+
+purple "检测到运行平台: ${PLATFORM}$( [ "$PLATFORM" = "vps" ] && echo " (init: ${INIT_SYSTEM})" )"
+case "$ACTION" in
+    re) purple "模式: 重新配置(未显式指定的参数沿用上次安装的值,套用新的环境变量并重启服务)" ;;
+    update) purple "模式: 强制更新(重新下载 xray/cloudflared 二进制,沿用已保存的配置并重启)" ;;
+esac
+
+# ---------------------------------------------------------------
+# 目录初始化(install/re/update 都要走到这里,de/status 前面已经 exit 了)
 # ---------------------------------------------------------------
 if [ "$PLATFORM" = "serv00" ]; then
-    if [[ "$HOSTNAME" =~ ct8 ]]; then
-        CURRENT_DOMAIN="ct8.pl"
-    elif [[ "$HOSTNAME" =~ hostuno ]]; then
-        CURRENT_DOMAIN="useruno.com"
-    else
-        CURRENT_DOMAIN="serv00.net"
-    fi
-    WORKDIR="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/logs"
-    FILE_PATH="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/public_html"
-    BIN_DIR="${HOME}/.vless_argo_bin"
-
-    if [ "$ACTION" = "de" ]; then
-        do_uninstall
-        exit 0
-    fi
-
     # 只清理上一次由本脚本启动、且记录在 pid 文件里的进程,不再广撒网 kill 当前用户下所有进程
-    for pidfile in "${BIN_DIR}/web.pid" "${BIN_DIR}/bot.pid"; do
-        if [ -f "$pidfile" ]; then
-            old_pid=$(cat "$pidfile" 2>/dev/null)
-            if [ -n "$old_pid" ] && kill -0 "$old_pid" >/dev/null 2>&1; then
-                kill -9 "$old_pid" >/dev/null 2>&1
-            fi
-        fi
-    done
-    rm -rf "$WORKDIR" "$FILE_PATH" && mkdir -p "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
+    graceful_kill_pidfile "${BIN_DIR}/web.pid"
+    graceful_kill_pidfile "${BIN_DIR}/bot.pid"
+    safe_rm "$WORKDIR" "$FILE_PATH"
+    mkdir -p "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
     chmod 777 "$WORKDIR" "$FILE_PATH" >/dev/null 2>&1
 else
-    [ "$(id -u)" -ne 0 ] && { red "VPS 模式请使用 root 权限运行本脚本"; exit 1; }
-    WORKDIR="/var/log/xray-argo"
-    FILE_PATH="/var/www/xray-argo"
-    BIN_DIR="/etc/xray-argo"
-
-    if [ "$ACTION" = "de" ]; then
-        do_uninstall
-        exit 0
-    fi
-
     mkdir -p "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
 fi
 
@@ -202,6 +309,11 @@ fi
 # ---------------------------------------------------------------
 check_port() {
   if [ "$PLATFORM" = "serv00" ]; then
+    if { [ "$ACTION" = "re" ] || [ "$ACTION" = "update" ]; } && [ -n "$SAVED_PORT" ]; then
+        export PORT="$SAVED_PORT"
+        purple "沿用已分配端口: $PORT (serv00 端口由 devil 分配,如需换端口请先 de 卸载再重新 install)"
+        return
+    fi
     clear
     purple "正在检测可用端口,请稍等..."
     port_list=$(devil port list)
@@ -234,8 +346,8 @@ check_port() {
     fi
     export PORT=$tcp_port1
   else
-    # VPS: 固定端口 + 占用检测
-    if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":${VLESS_PORT} "; then
+    # VPS: re/update 时旧服务本来就还占着这个端口,跳过占用检测,否则会把自己误判成端口冲突
+    if [ "$ACTION" != "re" ] && [ "$ACTION" != "update" ] && command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":${VLESS_PORT} "; then
         red "端口 ${VLESS_PORT} 已被占用,请通过 VLESS_PORT=xxxx 环境变量指定其他端口后重试"
         exit 1
     fi
@@ -308,7 +420,7 @@ download_binaries() {
     fi
 
     if [ -x "${BIN_DIR}/web" ] && [ "$FORCE_REDOWNLOAD" != "1" ]; then
-        green "web 已存在,跳过下载(如需强制重下载,设置 FORCE_REDOWNLOAD=1)"
+        green "web 已存在,跳过下载(如需强制重下载,用 update 子命令或设置 FORCE_REDOWNLOAD=1)"
     else
         fetch_with_retry "${BASE_URL}/web" "${BIN_DIR}/web" || exit 1
         chmod +x "${BIN_DIR}/web"
@@ -329,7 +441,7 @@ download_binaries() {
     esac
 
     if [ -x "${BIN_DIR}/xray-core/xray" ] && [ "$FORCE_REDOWNLOAD" != "1" ]; then
-        green "xray 已存在,跳过下载(如需强制重下载,设置 FORCE_REDOWNLOAD=1)"
+        green "xray 已存在,跳过下载(如需强制重下载,用 update 子命令或设置 FORCE_REDOWNLOAD=1)"
     else
         fetch_with_retry "https://api.github.com/repos/XTLS/Xray-core/releases/latest" "${BIN_DIR}/xray_latest.json" || exit 1
         XRAY_VER=$(grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' "${BIN_DIR}/xray_latest.json" | head -n1 | cut -d'"' -f4)
@@ -561,6 +673,7 @@ EOF
   fi
 }
 start_services
+save_state
 
 # ---------------------------------------------------------------
 # 获取 Argo 域名
@@ -649,8 +762,8 @@ generate_links() {
 }
 generate_links
 
-if [ "$ACTION" = "re" ]; then
-    green "\n重新配置完成! 已用新参数重启服务 (platform: ${PLATFORM})\n"
-else
-    green "\nRunning done! (platform: ${PLATFORM})\n"
-fi
+case "$ACTION" in
+    re) green "\n重新配置完成! 已用新参数重启服务 (platform: ${PLATFORM})\n" ;;
+    update) green "\n更新完成! 已重新下载二进制并重启服务 (platform: ${PLATFORM})\n" ;;
+    *) green "\nRunning done! (platform: ${PLATFORM})\n" ;;
+esac
