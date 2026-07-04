@@ -1,4 +1,4 @@
-<h2>Fixed tunnel</h2>
+<h2>Fixed Tunnel</h2>
 
 
 ```bash
@@ -25,7 +25,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Vless_Argo/main/Vles
 
 > 
 
-<h2>Temporary tunnel</h2>
+<h2>Temporary Tunnel</h2>
 
 
 ```bash
