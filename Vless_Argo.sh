@@ -178,6 +178,10 @@ SAVED_ARGO_AUTH=$(printf '%q' "$ARGO_AUTH")
 SAVED_CFIP=$(printf '%q' "$CFIP")
 SAVED_CFPORT=$(printf '%q' "$CFPORT")
 SAVED_SUB_TOKEN=$(printf '%q' "$SUB_TOKEN")
+SAVED_TG_TOKEN=$(printf '%q' "$TG_TOKEN")
+SAVED_TG_ID=$(printf '%q' "$TG_ID")
+SAVED_BOT_ARGS=$(printf '%q' "$args")
+SAVED_WORKDIR=$(printf '%q' "$WORKDIR")
 EOF
 }
 get_xray_version_string() {
@@ -189,10 +193,35 @@ get_xray_version_string() {
 }
 
 # ---------------------------------------------------------------
+# TG 心跳监控: 公共变量 + 定时任务清理函数
+# 提前到这里定义(而不是放在脚本靠后位置),是因为 de 卸载分支会提前 exit,
+# 必须保证清理逻辑在那之前就已经可用
+# ---------------------------------------------------------------
+HEALTH_MARK="vless-argo-health"                # crontab/systemd 单元的统一标识,用于精确清理,不影响用户自己的其他定时任务
+HEALTH_SCRIPT="${BIN_DIR}/healthcheck.sh"
+HEALTH_STATE="${BIN_DIR}/.health_state"
+
+# 清理心跳监控的定时任务(crontab 条目 / systemd timer)。
+# 卸载时无条件调用一次,不管本次是否启用了 TG 心跳,避免"以前装过、现在没传 TG_TOKEN"导致的任务残留。
+# healthcheck.sh 本体和状态文件在 BIN_DIR 里,会随 BIN_DIR 一起被 safe_rm 删除,这里不用单独处理。
+remove_healthcheck_schedule() {
+    if command -v crontab >/dev/null 2>&1; then
+        ( crontab -l 2>/dev/null | grep -v "$HEALTH_MARK" ) | crontab - 2>/dev/null
+    fi
+    if [ "$PLATFORM" = "vps" ] && [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl disable --now vless-argo-health.timer >/dev/null 2>&1
+        rm -f /etc/systemd/system/vless-argo-health.service /etc/systemd/system/vless-argo-health.timer
+        systemctl daemon-reload >/dev/null 2>&1
+    fi
+}
+
+# ---------------------------------------------------------------
 # 卸载/清理(de 模式专用): 停服务、删配置、删站点,不做任何安装动作
 # ---------------------------------------------------------------
 do_uninstall() {
     purple "正在卸载 vless-argo 并清理相关文件..."
+    remove_healthcheck_schedule
+    purple "已清理心跳监控定时任务(如有)"
 
     if [ "$PLATFORM" = "serv00" ]; then
         graceful_kill_pidfile "${BIN_DIR}/web.pid"
@@ -252,6 +281,9 @@ export CFPORT=${CFPORT:-${SAVED_CFPORT:-'443'}}
 export SUB_TOKEN=${SUB_TOKEN:-${SAVED_SUB_TOKEN:-${UUID:0:8}}}
 # 仅 VPS 场景使用,serv00 端口由 devil 分配后覆盖
 export VLESS_PORT=${VLESS_PORT:-${SAVED_PORT:-'443'}}
+# 只要同时设置了这两项,就自动启用 TG 心跳监控,不需要额外开关
+export TG_TOKEN=${TG_TOKEN:-${SAVED_TG_TOKEN:-''}}
+export TG_ID=${TG_ID:-${SAVED_TG_ID:-''}}
 
 # ---------------------------------------------------------------
 # status 模式: 只读查看,不改动任何东西
@@ -267,6 +299,22 @@ do_status() {
     echo "ARGO_DOMAIN  : ${ARGO_DOMAIN:-<未设置,使用quick tunnel>}"
     echo "ARGO_AUTH    : $([ -n "$ARGO_AUTH" ] && echo '已设置(内容不显示)' || echo '<未设置>')"
     echo "Xray 版本     : $(get_xray_version_string)"
+    if [ -n "$TG_TOKEN" ] && [ -n "$TG_ID" ]; then
+        if [ -x "$HEALTH_SCRIPT" ]; then
+            green "TG心跳监控   : 已启用 (TG_ID=${TG_ID}, 脚本: ${HEALTH_SCRIPT})"
+        else
+            yellow "TG心跳监控   : 已配置TG_TOKEN/TG_ID,但未找到心跳脚本(可能尚未 install/re 过),请重新执行一次脚本"
+        fi
+        if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q "$HEALTH_MARK"; then
+            echo "  定时任务   : crontab 已注册 (每2分钟)"
+        elif [ "$PLATFORM" = "vps" ] && [ "$INIT_SYSTEM" = "systemd" ] && systemctl is-active --quiet vless-argo-health.timer 2>/dev/null; then
+            echo "  定时任务   : systemd timer 已注册 (每2分钟)"
+        else
+            yellow "  定时任务   : 未检测到(可能需要重新执行脚本以注册)"
+        fi
+    else
+        echo "TG心跳监控   : 未启用(设置 TG_TOKEN + TG_ID 环境变量后重新执行即可自动开启)"
+    fi
     echo "---------------------------------------------------------------"
     if [ "$PLATFORM" = "serv00" ]; then
         for name in web bot; do
@@ -726,6 +774,261 @@ get_argodomain() {
 }
 
 # ---------------------------------------------------------------
+# TG 心跳监控: 只要 TG_TOKEN + TG_ID 同时设置就自动启用,无需额外开关
+#   - 生成独立的 healthcheck.sh,定时探测 xray/cloudflared 是否存活
+#   - 只在状态变化时(正常->异常 / 异常->恢复)推送消息,不会每次检查都刷屏
+#   - 检测到异常先自动尝试重启,重启成功/失败的结果一并发送
+#   - 调度: VPS 有 systemd 就用 systemd timer,serv00 和 OpenRC(Alpine)用标准 crontab
+#   - 卸载(de)时由前面定义的 remove_healthcheck_schedule 统一清理,不留定时任务垃圾
+# ---------------------------------------------------------------
+install_healthcheck() {
+    if [ -z "$TG_TOKEN" ] || [ -z "$TG_ID" ]; then
+        yellow "未设置 TG_TOKEN / TG_ID,跳过心跳监控(如需启用,带上这两个环境变量重新执行本脚本即可)"
+        # 防止"之前启用过、这次没传"导致旧的定时任务和脚本残留
+        remove_healthcheck_schedule
+        safe_rm "$HEALTH_SCRIPT" "$HEALTH_STATE"
+        return
+    fi
+
+    purple "检测到 TG_TOKEN/TG_ID,正在配置心跳监控..."
+
+    # 用占位符写文件,再用 sed 替换成真实路径/平台信息,避免直接在 heredoc 里插值时
+    # BIN_DIR 等变量万一包含特殊字符导致生成的子脚本语法出错
+    cat > "$HEALTH_SCRIPT" << 'HEALTHEOF'
+#!/bin/bash
+# 由 vless-argo 主脚本自动生成,请勿手动编辑;重新执行主脚本会覆盖,de 卸载时会自动删除
+STATE_FILE="__STATE_FILE__"
+PLATFORM="__PLATFORM__"
+INIT_SYSTEM="__INIT_SYSTEM__"
+BIN_DIR="__BIN_DIR__"
+HEALTH_STATE_FILE="__HEALTH_STATE__"
+
+[ -f "$STATE_FILE" ] || exit 0
+# shellcheck disable=SC1090
+source "$STATE_FILE"
+
+TG_TOKEN="$SAVED_TG_TOKEN"
+TG_ID="$SAVED_TG_ID"
+[ -z "$TG_TOKEN" ] || [ -z "$TG_ID" ] && exit 0
+
+# 发送失败(网络超时/被限流等)时重试一次;判断是否成功以 Telegram 返回体里的 "ok":true 为准,
+# 而不是只看 curl/wget 退出码——因为 HTTP 200 但业务失败(比如被限流 429、chat_id 错误)时,退出码通常仍是 0
+tg_send() {
+    local text="$1" attempt=0 ok=1 resp_file
+    resp_file="$(mktemp 2>/dev/null || echo "/tmp/.tgresp_$$")"
+    while [ $attempt -lt 2 ]; do
+        attempt=$((attempt + 1))
+        if command -v curl >/dev/null 2>&1; then
+            curl -s --max-time 10 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+                --data-urlencode "chat_id=${TG_ID}" \
+                --data-urlencode "text=${text}" -o "$resp_file" 2>/dev/null
+            grep -q '"ok":true' "$resp_file" 2>/dev/null && ok=0
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q -T 10 -O "$resp_file" \
+                "https://api.telegram.org/bot${TG_TOKEN}/sendMessage?chat_id=${TG_ID}&text=$(printf '%s' "$text" | sed 's/ /%20/g; s/$/%0A/')" \
+                >/dev/null 2>&1
+            grep -q '"ok":true' "$resp_file" 2>/dev/null && ok=0
+        fi
+        [ "$ok" -eq 0 ] && break
+        sleep 3
+    done
+    rm -f "$resp_file"
+    return $ok
+}
+
+# 判断本地端口是否真的在监听(/dev/tcp 是 bash 内建能力,不依赖额外装 nc)
+is_port_open() {
+    local port="$1"
+    [ -z "$port" ] && return 1
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 3 bash -c "echo >/dev/tcp/127.0.0.1/${port}" >/dev/null 2>&1
+    else
+        (exec 3<>"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1
+    fi
+}
+
+# xray 是否真正可用:进程/服务存活是前提,但存活不代表能用(配置错、内部异常都可能导致端口没起来),
+# 所以额外加一层本地端口连通性探测,两者都过才算真的"up"
+is_alive_xray() {
+    if [ "$PLATFORM" = "serv00" ]; then
+        [ -f "${BIN_DIR}/web.pid" ] && kill -0 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1 || return 1
+    elif [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl is-active --quiet xray-argo || return 1
+    else
+        rc-service xray-argo status 2>/dev/null | grep -q started || return 1
+    fi
+    is_port_open "$SAVED_PORT"
+}
+
+is_alive_cf() {
+    if [ "$PLATFORM" = "serv00" ]; then
+        [ -f "${BIN_DIR}/bot.pid" ] && kill -0 "$(cat "${BIN_DIR}/bot.pid" 2>/dev/null)" >/dev/null 2>&1
+    elif [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl is-active --quiet cloudflared-argo
+    else
+        rc-service cloudflared-argo status 2>/dev/null | grep -q started
+    fi
+}
+
+restart_xray() {
+    if [ "$PLATFORM" = "serv00" ]; then
+        [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1
+        ( cd "$BIN_DIR" && nohup ./web -c config.json >/dev/null 2>&1 & echo $! > "${BIN_DIR}/web.pid" )
+    elif [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl restart xray-argo >/dev/null 2>&1
+    else
+        rc-service xray-argo restart >/dev/null 2>&1
+    fi
+    sleep 3
+    is_alive_xray
+}
+
+restart_cf() {
+    if [ "$PLATFORM" = "serv00" ]; then
+        [ -f "${BIN_DIR}/bot.pid" ] && kill -9 "$(cat "${BIN_DIR}/bot.pid" 2>/dev/null)" >/dev/null 2>&1
+        ( cd "$BIN_DIR" && nohup ./bot ${SAVED_BOT_ARGS} >/dev/null 2>&1 & echo $! > "${BIN_DIR}/bot.pid" )
+    elif [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl restart cloudflared-argo >/dev/null 2>&1
+    else
+        rc-service cloudflared-argo restart >/dev/null 2>&1
+    fi
+    sleep 3
+    is_alive_cf
+}
+
+# 取当前生效的 Argo 域名。
+# 固定隧道(设置了 ARGO_AUTH,token 或 TunnelSecret 模式)域名是绑定好的,不会变,直接返回。
+# quick tunnel(未设置 ARGO_AUTH)模式下,每次 cloudflared 重启域名都会重新随机分配,需要从 boot.log 里解析;
+# wait_retries>0 时会重试等待(用于刚重启完、隧道还没建立好的情况),平时每轮只读一次不等待,避免每2分钟都白等几秒。
+get_current_domain() {
+    local wait_retries="${1:-0}" n=0 d=""
+    if [ -n "$SAVED_ARGO_AUTH" ]; then
+        echo "$SAVED_ARGO_DOMAIN"
+        return
+    fi
+    while :; do
+        d=$(grep -oE 'https://[[:alnum:]+.-]+\.trycloudflare\.com' "${SAVED_WORKDIR}/boot.log" 2>/dev/null | tail -n1 | sed 's@https://@@')
+        [ -n "$d" ] && break
+        n=$((n + 1))
+        [ "$n" -gt "$wait_retries" ] && break
+        sleep 1
+    done
+    echo "$d"
+}
+
+# 读取上一次记录的状态,文件不存在(首次运行)时视为"up"且域名未知,避免刚装好第一次检测就误报
+prev_xray="up"; prev_cf="up"; prev_domain=""
+if [ -f "$HEALTH_STATE_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$HEALTH_STATE_FILE"
+fi
+
+cur_xray="down"; is_alive_xray && cur_xray="up"
+cur_cf="down"; is_alive_cf && cur_cf="up"
+cf_restarted=0
+msg=""
+
+if [ "$cur_xray" = "down" ] && [ "$prev_xray" != "down" ]; then
+    if restart_xray; then
+        cur_xray="up"
+        msg="${msg}⚠️ xray(节点) 掉线,已自动重启成功 ✅"$'\n'
+    else
+        msg="${msg}🔴 xray(节点) 掉线,自动重启失败,请人工检查 ❌"$'\n'
+    fi
+elif [ "$cur_xray" = "up" ] && [ "$prev_xray" = "down" ]; then
+    msg="${msg}✅ xray(节点) 已恢复正常"$'\n'
+fi
+
+if [ "$cur_cf" = "down" ] && [ "$prev_cf" != "down" ]; then
+    if restart_cf; then
+        cur_cf="up"
+        cf_restarted=1
+        msg="${msg}⚠️ cloudflared(隧道) 掉线,已自动重启成功 ✅"$'\n'
+    else
+        msg="${msg}🔴 cloudflared(隧道) 掉线,自动重启失败,请人工检查 ❌"$'\n'
+    fi
+elif [ "$cur_cf" = "up" ] && [ "$prev_cf" = "down" ]; then
+    msg="${msg}✅ cloudflared(隧道) 已恢复正常"$'\n'
+fi
+
+# 隧道刚重启完,新域名可能还没写进日志,多等几秒;平时(没重启)只读一次,读不到就沿用旧值,不当成"变化"
+if [ "$cf_restarted" -eq 1 ]; then
+    cur_domain="$(get_current_domain 6)"
+else
+    cur_domain="$(get_current_domain 0)"
+fi
+[ -z "$cur_domain" ] && cur_domain="$prev_domain"
+
+if [ -n "$prev_domain" ] && [ -n "$cur_domain" ] && [ "$prev_domain" != "$cur_domain" ]; then
+    msg="${msg}🔄 Argo隧道域名已变化: ${prev_domain} → ${cur_domain}"$'\n'"   请更新客户端(Netch等)里的节点地址"$'\n'
+fi
+
+if [ -n "$msg" ]; then
+    tg_send "$(hostname) vless-argo 状态变化:"$'\n'"${msg}"
+fi
+
+cat > "$HEALTH_STATE_FILE" <<EOF2
+prev_xray=${cur_xray}
+prev_cf=${cur_cf}
+prev_domain=${cur_domain}
+EOF2
+HEALTHEOF
+
+    sed -i \
+        -e "s#__STATE_FILE__#${STATE_FILE}#g" \
+        -e "s#__PLATFORM__#${PLATFORM}#g" \
+        -e "s#__INIT_SYSTEM__#${INIT_SYSTEM}#g" \
+        -e "s#__BIN_DIR__#${BIN_DIR}#g" \
+        -e "s#__HEALTH_STATE__#${HEALTH_STATE}#g" \
+        "$HEALTH_SCRIPT"
+    chmod +x "$HEALTH_SCRIPT"
+
+    # 首次安装/每次重装都重置为"正常",避免用旧状态触发一次多余的通知
+    cat > "$HEALTH_STATE" <<EOF
+prev_xray=up
+prev_cf=up
+EOF
+
+    remove_healthcheck_schedule   # 先清一遍旧的,防止 re/update 反复执行时重复叠加
+
+    if [ "$PLATFORM" = "vps" ] && [ "$INIT_SYSTEM" = "systemd" ]; then
+        cat > /etc/systemd/system/vless-argo-health.service << EOF
+[Unit]
+Description=vless-argo healthcheck (${HEALTH_MARK})
+
+[Service]
+Type=oneshot
+ExecStart=${HEALTH_SCRIPT}
+EOF
+        cat > /etc/systemd/system/vless-argo-health.timer << EOF
+[Unit]
+Description=Run vless-argo healthcheck every 2 minutes (${HEALTH_MARK})
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl daemon-reload
+        systemctl enable --now vless-argo-health.timer >/dev/null 2>&1
+        if systemctl is-active --quiet vless-argo-health.timer; then
+            green "已通过 systemd timer 启用心跳监控(每2分钟探测一次)"
+        else
+            red "vless-argo-health.timer 启动失败,请用 systemctl status vless-argo-health.timer 查看"
+        fi
+    else
+        if command -v crontab >/dev/null 2>&1; then
+            ( crontab -l 2>/dev/null | grep -v "$HEALTH_MARK"; echo "*/2 * * * * ${HEALTH_SCRIPT} >/dev/null 2>&1 # ${HEALTH_MARK}" ) | crontab -
+            green "已通过 crontab 启用心跳监控(每2分钟探测一次)"
+        else
+            red "未找到 crontab 命令,心跳脚本已生成但未能自动加入定时任务,请手动配置: */2 * * * * ${HEALTH_SCRIPT}"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------
 # serv00 专属:全自动保活服务(VPS 用 systemd 自带保活,无需此步骤)
 # ---------------------------------------------------------------
 install_keepalive() {
@@ -786,7 +1089,9 @@ generate_links() {
 
   if [ "$PLATFORM" = "serv00" ]; then
     green "\n订阅链接: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_vless.log\n"
-    rm -rf "${BIN_DIR}/config.json" "${WORKDIR}/boot.log" "${BIN_DIR}/tunnel.json" "${BIN_DIR}/tunnel.yml"
+    # 注意: 这里只删 boot.log(避免重启cloudflared后读到旧的隧道域名)。
+    # config.json/tunnel.json/tunnel.yml 不能删——心跳监控掉线自动重启时(./web -c config.json / ./bot --config tunnel.yml)还需要用到它们。
+    rm -rf "${WORKDIR}/boot.log"
     step "安装保活服务"
     install_keepalive
   else
@@ -797,6 +1102,9 @@ generate_links() {
 }
 step "生成订阅链接"
 generate_links
+
+purple "\n[附加] 配置 TG 心跳监控(节点/隧道保活状态通知)"
+install_healthcheck
 
 case "$ACTION" in
     re) green "\n重新配置完成! 已用新参数重启服务 (platform: ${PLATFORM})\n" ;;
