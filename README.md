@@ -7,6 +7,15 @@ VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls ht
 
 > 
 
+<h2>- Warp</h2>
+
+
+```bash
+WARP="1" VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Vless_Argo/main/Vless_Argo.sh)
+```
+
+>
+
 <h2>- Reload&Refresh</h2>
 
 
