@@ -183,6 +183,7 @@ SAVED_TG_TOKEN=$(printf '%q' "$TG_TOKEN")
 SAVED_TG_ID=$(printf '%q' "$TG_ID")
 SAVED_BOT_ARGS=$(printf '%q' "$args")
 SAVED_WORKDIR=$(printf '%q' "$WORKDIR")
+SAVED_FILE_PATH=$(printf '%q' "$FILE_PATH")
 SAVED_WARP=$(printf '%q' "$WARP")
 EOF
     # STATE_FILE 里明文保存了 TG_TOKEN 等敏感信息,收紧权限避免同机其他用户读取
@@ -1240,7 +1241,14 @@ fi
 [ -z "$cur_domain" ] && cur_domain="$prev_domain"
 
 if [ -n "$prev_domain" ] && [ -n "$cur_domain" ] && [ "$prev_domain" != "$cur_domain" ]; then
-    msg="${msg}🔄 Argo隧道域名已变化: ${prev_domain} → ${cur_domain}"$'\n'"   请更新客户端(Netch等)里的节点地址"$'\n'
+    # 域名变了,直接拼出新的 vless:// 链接一起推送,不用让用户自己去猜怎么改;
+    # 拼接公式必须和主脚本 generate_links() 里的保持完全一致,否则两边生成的链接会不一样
+    new_link="vless://${SAVED_UUID}@${SAVED_CFIP}:${SAVED_CFPORT}?encryption=none&security=tls&sni=${cur_domain}&type=ws&host=${cur_domain}&path=%2Fvless-argo%3Fed%3D2560#vless-argo-__PLATFORM__-$(hostname)"
+    msg="${msg}🔄 Argo隧道域名已变化: ${prev_domain} → ${cur_domain}"$'\n'"新节点链接:"$'\n'"${new_link}"$'\n'
+    # 同步刷新本地订阅文件内容,避免文件里存的还是老域名的链接
+    if [ -n "$SAVED_FILE_PATH" ] && [ -n "$SAVED_SUB_TOKEN" ] && [ -d "$SAVED_FILE_PATH" ]; then
+        echo "$new_link" > "${SAVED_FILE_PATH}/${SAVED_SUB_TOKEN}_vless.log" 2>/dev/null
+    fi
 fi
 
 if [ -n "$msg" ]; then
