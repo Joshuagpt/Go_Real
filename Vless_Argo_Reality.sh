@@ -964,8 +964,20 @@ reality_configure() {
             purple "检测到已保存的 Reality 密钥对(端口未变),直接复用,不重新生成"
         else
             purple "正在生成 Reality 密钥对..."
-            local keypair
-            keypair=$("${BIN_DIR}/xray" x25519 2>/dev/null)
+local keypair rc
+
+keypair=$("$XRAY_BIN" x25519 2>&1)
+rc=$?
+
+if [ $rc -ne 0 ]; then
+    red "xray x25519 执行失败："
+    echo "$keypair"
+    unset REALITY_PORT
+    return
+fi
+
+purple "xray x25519 输出："
+echo "$keypair"
             # 兼容两种 xray x25519 输出格式:
             #   旧版: "Private key: xxx" / "Public key: xxx"
             #   新版(v25.3.6+): "PrivateKey: xxx" / "Password: xxx"(Password 就是旧版的 Public key,
