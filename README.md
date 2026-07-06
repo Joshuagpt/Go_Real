@@ -58,3 +58,12 @@ bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Vless_Argo_Reality/m
 TG_TOKEN="..." TG_ID="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Vless_Argo_Reality/main/Vless_Argo_Reality.sh))
 ```
 >
+
+<h2>✅ servct</h2>
+
+
+```bash
+UUID= GLOBAL_WARP=true bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Vless_Argo_Reality/main/servct.sh))
+```
+
+>
