@@ -63,7 +63,7 @@ TG_TOKEN="..." TG_ID="..." bash <(curl -Ls https://raw.githubusercontent.com/Jos
 
 
 ```bash
-UUID= GLOBAL_WARP=true bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Vless_Argo_Reality/main/servct.sh)
+UUID= bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Vless_Argo_Reality/main/servct.sh)
 ```
 
 >
