@@ -67,3 +67,12 @@ UUID= bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/s
 ```
 
 >
+
+<h2>✅ servctx</h2>
+
+
+```bash
+UUID= bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/servctx.sh)
+```
+
+>
