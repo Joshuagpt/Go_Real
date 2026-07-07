@@ -704,7 +704,9 @@ function generateXrayConfig(warpConfig) {
       tag: 'wireguard-out',
       settings: {
         secretKey: warpConfig.private_key,
-        address: [`${warpConfig.address_v4}/32`],
+        address: warpConfig.address_v6
+          ? [`${warpConfig.address_v4}/32`, `${warpConfig.address_v6}/128`]
+          : [`${warpConfig.address_v4}/32`],
         peers: [{
           publicKey: warpConfig.public_key,
           endpoint: `${warpConfig.endpoint_host}:${warpConfig.endpoint_port}`
