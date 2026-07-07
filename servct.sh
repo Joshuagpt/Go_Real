@@ -482,14 +482,23 @@ function probeWireguardOutboundSupport(libraryPath, startSymbol, stopSymbol) {
   };
 
   let rc;
+  const probeConfigPath = path.resolve(runtimeFilePath, '.wireguard-probe.json');
   try {
-    rc = startFn(JSON.stringify(probeConfig));
+    // StartSingBox 期望的是 {config, workingDir, disableColor} 这层启动参数信封，
+    // 其中 config 必须是磁盘上配置文件的路径，而不是内联的配置内容本身
+    // （这与 singBoxPayload() 生产环境的调用约定完全一致，此前这里直接把
+    // probeConfig 序列化传入，被 .so 内部当成 CLI 参数解析，才误判成"不支持"）
+    fs.writeFileSync(probeConfigPath, JSON.stringify(probeConfig));
+    const probePayload = JSON.stringify({ config: probeConfigPath, workingDir: '.', disableColor: true });
+    rc = startFn(probePayload);
   } catch (e) {
     console.log('WARP: 兼容性探测调用异常(' + e.message + ')，判定为不支持 wireguard 出站');
     try { stopFn(); } catch (e2) { /* ignore */ }
+    try { fs.unlinkSync(probeConfigPath); } catch (e3) { /* ignore */ }
     return false;
   }
   try { stopFn(); } catch (e) { /* ignore */ }
+  try { fs.unlinkSync(probeConfigPath); } catch (e) { /* ignore */ }
 
   const supported = rc === 0;
   console.log(`WARP: 当前 sing-box 库(.so)兼容性探测 -> ${supported ? '通过，支持 wireguard 出站' : '未通过(返回码 ' + rc + ')，该版本不支持我们使用的 wireguard 出站写法'}`);
@@ -1046,6 +1055,10 @@ install_service () {
     rm -rf $HOME/domains/${USERNAME}.${CURRENT_DOMAIN} > /dev/null 2>&1
     devil www add ${USERNAME}.${CURRENT_DOMAIN} nodejs /usr/local/bin/node24 > /dev/null 2>&1
     [ -d "$WORKDIR" ] || mkdir -p "$WORKDIR"
+    # devil 在 add 时会自动在 public/ 下放一个默认占位 index.html；
+    # Passenger 对该目录下的静态文件优先级高于应用本身，不清掉的话根路径请求
+    # 永远会被这个占位页拦截，走不到 Node app.js
+    rm -f "${WORKDIR}/public/index.html" > /dev/null 2>&1
     write_app_js "${WORKDIR}/app.js"
     cat > "${WORKDIR}/index.html" <<'HTMLEOF'
 <!DOCTYPE html>
