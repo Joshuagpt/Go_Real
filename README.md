@@ -22,7 +22,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real
 
 > 
 
-<h2>✅ Reality</h2>
+<h2>▶ Reality</h2>
 
 ```bash
 REALITY_PORT="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh)
@@ -30,7 +30,7 @@ REALITY_PORT="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/G
 
 >
 
-<h2>✅ Warp</h2>
+<h2>▶ Warp</h2>
 
 ```bash
 WARP="1" bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh)
