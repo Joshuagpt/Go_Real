@@ -170,7 +170,7 @@ do_uninstall() {
     graceful_kill_pidfile "${BIN_DIR}/core.pid"
     graceful_kill_pidfile "${BIN_DIR}/sync.pid"
     pkill -f "${BIN_DIR}/core" >/dev/null 2>&1
-    pkill -f "${BIN_DIR}/sync" >/dev/null 2>&1
+    pkill -f "cf_run.py" >/dev/null 2>&1
 
     devil www del "${USERNAME}.${CURRENT_DOMAIN}" >/dev/null 2>&1
     devil www del "hb.${USERNAME}.${CURRENT_DOMAIN}" >/dev/null 2>&1
@@ -357,6 +357,16 @@ step "配置隧道"
 relay_configure
 
 # ---------------------------------------------------------------
+# 提前创建站点目录: devil www add 才是真正建出 public_html 目录的动作,
+# 必须放在所有会往 $FILE_PATH 里写文件的步骤(主页占位/订阅文件)之前,
+# 否则会出现 "No such file or directory"(参考 Servctx.sh 里 install_service
+# 一开始就 devil www add + mkdir -p 的顺序)
+# ---------------------------------------------------------------
+step "创建站点目录"
+devil www add "${USERNAME}.${CURRENT_DOMAIN}" php >/dev/null 2>&1
+mkdir -p "$FILE_PATH" "$WORKDIR"
+
+# ---------------------------------------------------------------
 # 下载核心程序(freebsd 原生二进制,serv00/ct8 内核是 FreeBSD)
 # !!! 请把下面两个 URL 换成你自己仓库/主机上的二进制下载地址 !!!
 # ---------------------------------------------------------------
@@ -396,6 +406,51 @@ download_binaries() {
 }
 step "下载核心程序"
 download_binaries
+
+# ---------------------------------------------------------------
+# sync(即 helper.so)是共享库(.so),要通过 dlopen + 导出符号
+# StartCloudflared(json_args)/StopCloudflared() 调用,不能像普通可执行文件
+# 一样直接 nohup 执行(直接执行会 SIGSEGV,因为它没有兼容的入口点解析 argv)。
+# 用 python3 ctypes 做一层极薄的 FFI 包装,不引入 Node.js/npm 依赖。
+# ---------------------------------------------------------------
+command -v python3 >/dev/null 2>&1 || { red "未找到 python3,sync(cloudflared)组件需要 python3 才能正常调用,请先安装"; exit 1; }
+
+CF_RUNNER="${BIN_DIR}/cf_run.py"
+cat > "$CF_RUNNER" <<'PYEOF'
+#!/usr/bin/env python3
+# 由主脚本自动生成,请勿手动编辑。
+# 用法: cf_run.py <helper.so路径> <tunnel参数...>
+# helper.so 是共享库,导出 StartCloudflared(json_str)/StopCloudflared(),
+# 这里原样转发命令行参数为 {"args": [...]} 传给它,行为对齐 Servctx.sh 里
+# koffi.load(...).func("int StartCloudflared(str)") 的调用方式。
+import ctypes, json, sys, signal, os
+
+if len(sys.argv) < 2:
+    sys.exit("usage: cf_run.py <so_path> [tunnel args...]")
+
+so_path = sys.argv[1]
+tunnel_args = sys.argv[2:]
+
+lib = ctypes.CDLL(so_path)
+lib.StartCloudflared.argtypes = [ctypes.c_char_p]
+lib.StartCloudflared.restype = ctypes.c_int
+lib.StopCloudflared.argtypes = []
+lib.StopCloudflared.restype = ctypes.c_int
+
+def _graceful_stop(signum, frame):
+    try:
+        lib.StopCloudflared()
+    finally:
+        os._exit(0)
+
+signal.signal(signal.SIGTERM, _graceful_stop)
+signal.signal(signal.SIGINT, _graceful_stop)
+
+payload = json.dumps({"args": tunnel_args}).encode("utf-8")
+rc = lib.StartCloudflared(payload)
+sys.exit(rc if isinstance(rc, int) else 0)
+PYEOF
+chmod +x "$CF_RUNNER"
 
 # ---------------------------------------------------------------
 # WARP 出站(可选): 用 -test 校验模式实测二进制是否认识 wireguard 出站
@@ -615,15 +670,15 @@ start_services() {
       tunnelsecret) tun_args="tunnel --edge-ip-version auto --config ${BIN_DIR}/cred.yml run" ;;
       *)            tun_args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile ${WORKDIR}/boot.log --loglevel info --url http://localhost:$PORT" ;;
   esac
-  nohup ./sync $tun_args >/dev/null 2>&1 &
+  nohup python3 "${BIN_DIR}/cf_run.py" "${BIN_DIR}/sync" $tun_args >/dev/null 2>&1 &
   echo $! > "${BIN_DIR}/sync.pid"
   sleep 2
-  if pgrep -f "sync" >/dev/null; then
+  if pgrep -f "cf_run.py" >/dev/null; then
       green "隧道进程运行中"
   else
       red "隧道进程未运行,重试中..."
       [ -f "${BIN_DIR}/sync.pid" ] && kill -9 "$(cat "${BIN_DIR}/sync.pid")" >/dev/null 2>&1
-      nohup ./sync $tun_args >/dev/null 2>&1 &
+      nohup python3 "${BIN_DIR}/cf_run.py" "${BIN_DIR}/sync" $tun_args >/dev/null 2>&1 &
       echo $! > "${BIN_DIR}/sync.pid"
       sleep 2
   fi
@@ -738,7 +793,7 @@ restart_core() {
 }
 restart_sync() {
     [ -f "${BIN_DIR}/sync.pid" ] && kill -9 "$(cat "${BIN_DIR}/sync.pid" 2>/dev/null)" >/dev/null 2>&1
-    ( cd "$BIN_DIR" && nohup ./sync ${SAVED_TUN_ARGS} >/dev/null 2>&1 & echo $! > "${BIN_DIR}/sync.pid" )
+    ( cd "$BIN_DIR" && nohup python3 "${BIN_DIR}/cf_run.py" "${BIN_DIR}/sync" ${SAVED_TUN_ARGS} >/dev/null 2>&1 & echo $! > "${BIN_DIR}/sync.pid" )
     sleep 3
     is_alive_sync
 }
