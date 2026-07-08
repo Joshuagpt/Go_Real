@@ -1,7 +1,7 @@
 #!/bin/bash
 # ===================================================================
 # 通用 VLESS+WS+Argo 一键部署脚本
-# 兼容: Serv00/CT8 (共享主机, devil管理) 和 普通 Linux VPS (systemd/OpenRC管理)
+# 适用: 普通 Linux VPS (systemd/OpenRC管理)
 # 生命周期: install(默认) / re(改参数重装) / update(强制更新二进制并重启) / de(卸载清理) / status(查看状态)
 # ===================================================================
 
@@ -92,8 +92,7 @@ safe_rm() {
     fi
     for target in "$@"; do
         case "$target" in
-            "$BIN_DIR"|"$BIN_DIR"/*|"$WORKDIR"|"$WORKDIR"/*|"$FILE_PATH"|"$FILE_PATH"/*|\
-            "${HOME}/domains/keep.${USERNAME}.${CURRENT_DOMAIN}"|"${HOME}/domains/keep.${USERNAME}.${CURRENT_DOMAIN}"/*)
+            "$BIN_DIR"|"$BIN_DIR"/*|"$WORKDIR"|"$WORKDIR"/*|"$FILE_PATH"|"$FILE_PATH"/*)
                 rm -rf -- "$target"
                 ;;
             *)
@@ -103,50 +102,28 @@ safe_rm() {
     done
 }
 
-# 先礼后兵:普通 kill 给进程一点时间自行退出,超时仍未退出再 -9 强杀
-graceful_kill_pidfile() {
-    local pidfile="$1" pid i
-    [ -f "$pidfile" ] || return 0
-    pid=$(cat "$pidfile" 2>/dev/null)
-    [ -z "$pid" ] && return 0
-    if kill -0 "$pid" >/dev/null 2>&1; then
-        kill "$pid" >/dev/null 2>&1
-        for i in 1 2 3 4 5; do
-            kill -0 "$pid" >/dev/null 2>&1 || break
-            sleep 0.5
-        done
-        kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1
-    fi
-}
-
 # ---------------------------------------------------------------
-# 平台探测
+# 平台探测(仅支持普通 Linux VPS)
 # ---------------------------------------------------------------
-if command -v devil >/dev/null 2>&1; then
-    PLATFORM="serv00"
-elif [ -f /etc/os-release ] || [ -f /etc/alpine-release ]; then
+if [ -f /etc/os-release ] || [ -f /etc/alpine-release ]; then
     PLATFORM="vps"
 else
-    PLATFORM="other"
-fi
-
-if [ "$PLATFORM" = "other" ]; then
-    red "未能识别当前平台(既非 serv00/ct8 也非常见 Linux 发行版),脚本退出"
+    red "未能识别当前平台(非常见 Linux 发行版),脚本退出"
     exit 1
 fi
 
-# VPS 场景下,init 系统不一定是 systemd(如 Alpine 默认用 OpenRC),需要单独探测
+# init 系统不一定是 systemd(如 Alpine 默认用 OpenRC),需要单独探测
 INIT_SYSTEM="none"
-if [ "$PLATFORM" = "vps" ]; then
-    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-        INIT_SYSTEM="systemd"
-    elif command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then
-        INIT_SYSTEM="openrc"
-    else
-        red "未能识别 init 系统(既非 systemd 也非 OpenRC),脚本退出"
-        exit 1
-    fi
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    INIT_SYSTEM="systemd"
+elif command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then
+    INIT_SYSTEM="openrc"
+else
+    red "未能识别 init 系统(既非 systemd 也非 OpenRC),脚本退出"
+    exit 1
 fi
+
+[ "$(id -u)" -ne 0 ] && { red "请使用 root 权限运行本脚本"; exit 1; }
 
 HOSTNAME=$(hostname)
 USERNAME=$(whoami | tr '[:upper:]' '[:lower:]')
@@ -154,23 +131,9 @@ USERNAME=$(whoami | tr '[:upper:]' '[:lower:]')
 # ---------------------------------------------------------------
 # 路径规划(纯计算,不做任何创建/删除动作;所有子命令都需要先知道这些路径)
 # ---------------------------------------------------------------
-if [ "$PLATFORM" = "serv00" ]; then
-    if [[ "$HOSTNAME" =~ ct8 ]]; then
-        CURRENT_DOMAIN="ct8.pl"
-    elif [[ "$HOSTNAME" =~ hostuno ]]; then
-        CURRENT_DOMAIN="useruno.com"
-    else
-        CURRENT_DOMAIN="serv00.net"
-    fi
-    WORKDIR="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/logs"
-    FILE_PATH="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/public_html"
-    BIN_DIR="${HOME}/.vless_argo_bin"
-else
-    [ "$(id -u)" -ne 0 ] && { red "VPS 模式请使用 root 权限运行本脚本"; exit 1; }
-    WORKDIR="/var/log/xray-argo"
-    FILE_PATH="/var/www/xray-argo"
-    BIN_DIR="/etc/xray-argo"
-fi
+WORKDIR="/var/log/xray-argo"
+FILE_PATH="/var/www/xray-argo"
+BIN_DIR="/etc/xray-argo"
 STATE_FILE="${BIN_DIR}/.vless_argo.env"
 
 # ---------------------------------------------------------------
@@ -208,10 +171,10 @@ EOF
     chmod 600 "$STATE_FILE" >/dev/null 2>&1
 }
 get_xray_version_string() {
-    if [ "$PLATFORM" = "vps" ] && [ -x "${BIN_DIR}/xray-core/xray" ]; then
+    if [ -x "${BIN_DIR}/xray-core/xray" ]; then
         "${BIN_DIR}/xray-core/xray" version 2>/dev/null | head -n1
     else
-        echo "未知(serv00 使用的是第三方重命名二进制,不支持查询版本)"
+        echo "未知"
     fi
 }
 
@@ -268,36 +231,21 @@ do_uninstall() {
     remove_healthcheck_schedule
     purple "已清理心跳监控定时任务(如有)"
 
-    if [ "$PLATFORM" = "serv00" ]; then
-        graceful_kill_pidfile "${BIN_DIR}/web.pid"
-        graceful_kill_pidfile "${BIN_DIR}/bot.pid"
-        pkill -f "${BIN_DIR}/web" >/dev/null 2>&1
-        pkill -f "${BIN_DIR}/bot" >/dev/null 2>&1
-
-        devil www del "${USERNAME}.${CURRENT_DOMAIN}" >/dev/null 2>&1
-        devil www del "keep.${USERNAME}.${CURRENT_DOMAIN}" >/dev/null 2>&1
-
-        safe_rm "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
-        safe_rm "$HOME/domains/keep.${USERNAME}.${CURRENT_DOMAIN}"
-
-        green "serv00/ct8 上的节点服务、保活服务及相关文件已清理完毕"
-    else
-        if [ "$INIT_SYSTEM" = "systemd" ]; then
-            systemctl disable --now xray-argo >/dev/null 2>&1
-            systemctl disable --now cloudflared-argo >/dev/null 2>&1
-            rm -f /etc/systemd/system/xray-argo.service /etc/systemd/system/cloudflared-argo.service
-            systemctl daemon-reload >/dev/null 2>&1
-        elif [ "$INIT_SYSTEM" = "openrc" ]; then
-            rc-service xray-argo stop >/dev/null 2>&1
-            rc-service cloudflared-argo stop >/dev/null 2>&1
-            rc-update del xray-argo default >/dev/null 2>&1
-            rc-update del cloudflared-argo default >/dev/null 2>&1
-            rm -f /etc/init.d/xray-argo /etc/init.d/cloudflared-argo
-        fi
-
-        safe_rm "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
-        green "VPS 上的服务、配置文件和二进制已清理完毕"
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl disable --now xray-argo >/dev/null 2>&1
+        systemctl disable --now cloudflared-argo >/dev/null 2>&1
+        rm -f /etc/systemd/system/xray-argo.service /etc/systemd/system/cloudflared-argo.service
+        systemctl daemon-reload >/dev/null 2>&1
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        rc-service xray-argo stop >/dev/null 2>&1
+        rc-service cloudflared-argo stop >/dev/null 2>&1
+        rc-update del xray-argo default >/dev/null 2>&1
+        rc-update del cloudflared-argo default >/dev/null 2>&1
+        rm -f /etc/init.d/xray-argo /etc/init.d/cloudflared-argo
     fi
+
+    safe_rm "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
+    green "VPS 上的服务、配置文件和二进制已清理完毕"
 
     green "卸载完成"
 }
@@ -353,7 +301,6 @@ export ARGO_AUTH=${ARGO_AUTH:-${SAVED_ARGO_AUTH:-''}}
 export CFIP=${CFIP:-${SAVED_CFIP:-'saas.sin.fan'}}
 export CFPORT=${CFPORT:-${SAVED_CFPORT:-'443'}}
 export SUB_TOKEN=${SUB_TOKEN:-${SAVED_SUB_TOKEN:-${UUID:0:8}}}
-# 仅 VPS 场景使用,serv00 端口由 devil 分配后覆盖
 export VLESS_PORT=${VLESS_PORT:-${SAVED_PORT:-'443'}}
 # 只要同时设置了这两项,就自动启用 TG 心跳监控,不需要额外开关
 export TG_TOKEN=${TG_TOKEN:-${SAVED_TG_TOKEN:-''}}
@@ -382,10 +329,6 @@ WARP_PROFILE="${BIN_DIR}/warp.json"
 # 防火墙放行这些依赖 check_port()/download_binaries() 先跑完的逻辑,放在 reality_configure() 里,
 # 在后面按正确的时序调用。
 # ---------------------------------------------------------------
-if [ "$PLATFORM" = "serv00" ] && [ -n "$REALITY_PORT" ]; then
-    yellow "REALITY_PORT 仅支持 VPS 场景,serv00/ct8 已忽略该参数"
-    unset REALITY_PORT
-fi
 if [ -n "$REALITY_PORT" ]; then
     if ! [[ "$REALITY_PORT" =~ ^[0-9]+$ ]] || [ "$REALITY_PORT" -lt 1 ] || [ "$REALITY_PORT" -gt 65535 ]; then
         red "REALITY_PORT 必须是 1-65535 之间的数字,当前传入的值无效: $REALITY_PORT"
@@ -417,7 +360,7 @@ get_public_ip() {
 # ---------------------------------------------------------------
 do_status() {
     echo "===================== vless-argo 状态 ====================="
-    echo "平台         : ${PLATFORM}$( [ "$PLATFORM" = "vps" ] && echo " (init: ${INIT_SYSTEM})" )"
+    echo "平台         : ${PLATFORM} (init: ${INIT_SYSTEM})"
     if [ ! -f "$STATE_FILE" ]; then
         yellow "未找到安装记录(${STATE_FILE} 不存在),下面是本次会用到的默认值,不代表实际已部署的配置"
     fi
@@ -451,7 +394,7 @@ do_status() {
     else
         echo "WARP出站     : 未启用(每次 install/re/update 时加上 WARP=1 环境变量才会开启,不会沿用上次的状态)"
     fi
-    if [ "$PLATFORM" = "vps" ] && [ -n "$SAVED_REALITY_PORT" ]; then
+    if [ -n "$SAVED_REALITY_PORT" ]; then
         green "Reality直连  : 已启用(端口: ${SAVED_REALITY_PORT}, 伪装目标: ${SAVED_REALITY_DEST})"
         if [ -n "$SAVED_REALITY_PUBLIC_KEY" ]; then
             local _pub_ip
@@ -462,30 +405,18 @@ do_status() {
                 yellow "  节点链接   : 获取公网IP失败,请手动查看本机IP后自行拼接"
             fi
         fi
-    elif [ "$PLATFORM" = "vps" ]; then
+    else
         echo "Reality直连  : 未启用(每次 install/re/update 时加上 REALITY_PORT=端口号 才会开启,不会沿用上次的状态)"
     fi
     echo "---------------------------------------------------------------"
-    if [ "$PLATFORM" = "serv00" ]; then
-        for name in web bot; do
-            pidfile="${BIN_DIR}/${name}.pid"
-            if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile" 2>/dev/null)" >/dev/null 2>&1; then
-                green "${name}: 运行中 (PID $(cat "$pidfile"))"
-            else
-                red "${name}: 未运行"
-            fi
-        done
-        [ -f "${FILE_PATH}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_vless.log" ] && echo "订阅链接文件: https://${USERNAME}.${CURRENT_DOMAIN}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_vless.log"
-    else
-        if [ "$INIT_SYSTEM" = "systemd" ]; then
-            systemctl is-active --quiet xray-argo && green "xray-argo: 运行中" || red "xray-argo: 未运行"
-            systemctl is-active --quiet cloudflared-argo && green "cloudflared-argo: 运行中" || red "cloudflared-argo: 未运行"
-        elif [ "$INIT_SYSTEM" = "openrc" ]; then
-            rc-service xray-argo status 2>/dev/null | grep -q started && green "xray-argo: 运行中" || red "xray-argo: 未运行"
-            rc-service cloudflared-argo status 2>/dev/null | grep -q started && green "cloudflared-argo: 运行中" || red "cloudflared-argo: 未运行"
-        fi
-        [ -f "${FILE_PATH}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_vless.log" ] && echo "订阅文件: ${FILE_PATH}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_vless.log"
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl is-active --quiet xray-argo && green "xray-argo: 运行中" || red "xray-argo: 未运行"
+        systemctl is-active --quiet cloudflared-argo && green "cloudflared-argo: 运行中" || red "cloudflared-argo: 未运行"
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        rc-service xray-argo status 2>/dev/null | grep -q started && green "xray-argo: 运行中" || red "xray-argo: 未运行"
+        rc-service cloudflared-argo status 2>/dev/null | grep -q started && green "cloudflared-argo: 运行中" || red "cloudflared-argo: 未运行"
     fi
+    [ -f "${FILE_PATH}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_vless.log" ] && echo "订阅文件: ${FILE_PATH}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_vless.log"
     echo "==============================================================="
 }
 
@@ -494,16 +425,15 @@ if [ "$ACTION" = "status" ]; then
     exit 0
 fi
 
-purple "检测到运行平台: ${PLATFORM}$( [ "$PLATFORM" = "vps" ] && echo " (init: ${INIT_SYSTEM})" )"
+purple "检测到运行平台: ${PLATFORM} (init: ${INIT_SYSTEM})"
 case "$ACTION" in
     re) purple "模式: 重新配置(未显式指定的参数沿用上次安装的值,套用新的环境变量并重启服务)" ;;
     update) purple "模式: 强制更新(重新下载 xray/cloudflared 二进制,沿用已保存的配置并重启)" ;;
 esac
 
-# serv00 多一步"安装保活服务",VPS 没有这一步
-[ "$PLATFORM" = "serv00" ] && TOTAL_STEPS=7 || TOTAL_STEPS=6
+TOTAL_STEPS=6
 [ "$WARP" = "1" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
-[ "$PLATFORM" = "vps" ] && { [ -n "$REALITY_PORT" ] || [ -n "$SAVED_REALITY_PORT" ]; } && TOTAL_STEPS=$((TOTAL_STEPS + 1))
+{ [ -n "$REALITY_PORT" ] || [ -n "$SAVED_REALITY_PORT" ]; } && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 STEP_NUM=0
 step() {
     STEP_NUM=$((STEP_NUM + 1))
@@ -513,82 +443,18 @@ step() {
 # ---------------------------------------------------------------
 # 目录初始化(install/re/update 都要走到这里,de/status 前面已经 exit 了)
 # ---------------------------------------------------------------
-if [ "$PLATFORM" = "serv00" ]; then
-    # 只清理上一次由本脚本启动、且记录在 pid 文件里的进程,不再广撒网 kill 当前用户下所有进程
-    graceful_kill_pidfile "${BIN_DIR}/web.pid"
-    graceful_kill_pidfile "${BIN_DIR}/bot.pid"
-    safe_rm "$WORKDIR" "$FILE_PATH"
-    mkdir -p "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
-    # 755 而不是 777: public_html 需要让 devil 起的 web 服务进程能"读"到订阅文件,
-    # 但不应该允许同机其他用户"写"这个目录(777 会导致任意用户可篡改/植入文件)
-    chmod 755 "$WORKDIR" "$FILE_PATH" >/dev/null 2>&1
-else
-    mkdir -p "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
-fi
+mkdir -p "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
 
 # ---------------------------------------------------------------
 # 端口选择
 # ---------------------------------------------------------------
 check_port() {
-  if [ "$PLATFORM" = "serv00" ]; then
-    if { [ "$ACTION" = "re" ] || [ "$ACTION" = "update" ]; } && [ -n "$SAVED_PORT" ]; then
-        export PORT="$SAVED_PORT"
-        purple "沿用已分配端口: $PORT (serv00 端口由 devil 分配,如需换端口请先 de 卸载再重新 install)"
-        return
-    fi
-    clear
-    purple "正在检测可用端口,请稍等..."
-    port_list=$(devil port list)
-    tcp_ports=$(echo "$port_list" | grep -c "tcp")
-    udp_ports=$(echo "$port_list" | grep -c "udp")
-
-    if [[ $tcp_ports -lt 1 ]]; then
-        red "没有可用的TCP端口,需要自动调整端口配额(此操作具有破坏性,会删除一个现有UDP端口并断开当前SSH会话)"
-        if [[ $udp_ports -ge 3 ]]; then
-            if [ "$ALLOW_PORT_ADJUST" != "1" ]; then
-                red "即将删除的UDP端口可能正被你其他服务占用,脚本不会未经确认擅自删除。"
-                red "如确认可以删除一个现有UDP端口来腾出TCP配额,请加上环境变量 ALLOW_PORT_ADJUST=1 重新运行本脚本。"
-                exit 1
-            fi
-            udp_port_to_delete=$(echo "$port_list" | awk '/udp/ {print $1}' | head -n 1)
-            yellow "5秒后将删除UDP端口: $udp_port_to_delete (Ctrl+C 可取消)"
-            sleep 5
-            devil port del udp $udp_port_to_delete
-            green "已删除udp端口: $udp_port_to_delete"
-        else
-            red "UDP端口数不足3个,无法通过删除UDP端口来腾出TCP配额,请手动在devil面板处理后重试"
-            exit 1
-        fi
-        while true; do
-            tcp_port=$(shuf -i 10000-65535 -n 1)
-            result=$(devil port add tcp $tcp_port 2>&1)
-            if [[ $result == *"Ok"* ]]; then
-                green "已添加TCP端口: $tcp_port"
-                tcp_port1=$tcp_port
-                break
-            else
-                yellow "端口 $tcp_port 不可用,尝试其他端口..."
-            fi
-        done
-        devil binexec on >/dev/null 2>&1
-        # serv00 的已知限制: 新分配的 TCP 端口往往要断开当前 SSH 会话重新连接后才会真正生效,
-        # 这里主动杀掉父进程(SSH shell)逼迫断线,不是误操作,是社区里对付这个限制的规避手段;
-        # 由于会直接掐断当前会话,提前给出明显倒计时提示,避免用户一头雾水
-        red "端口已调整完成! 5秒后将主动断开当前SSH连接以使新端口生效,请重新连接SSH后再次执行本脚本"
-        sleep 5
-        kill -9 $(ps -o ppid= -p $$) >/dev/null 2>&1
-    else
-        tcp_port1=$(echo "$port_list" | awk '/tcp/ {print $1}' | sed -n '1p')
-    fi
-    export PORT=$tcp_port1
-  else
-    # VPS: re/update 时旧服务本来就还占着这个端口,跳过占用检测,否则会把自己误判成端口冲突
-    if [ "$ACTION" != "re" ] && [ "$ACTION" != "update" ] && command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":${VLESS_PORT} "; then
-        red "端口 ${VLESS_PORT} 已被占用,请通过 VLESS_PORT=xxxx 环境变量指定其他端口后重试"
-        exit 1
-    fi
-    export PORT=$VLESS_PORT
+  # re/update 时旧服务本来就还占着这个端口,跳过占用检测,否则会把自己误判成端口冲突
+  if [ "$ACTION" != "re" ] && [ "$ACTION" != "update" ] && command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":${VLESS_PORT} "; then
+      red "端口 ${VLESS_PORT} 已被占用,请通过 VLESS_PORT=xxxx 环境变量指定其他端口后重试"
+      exit 1
   fi
+  export PORT=$VLESS_PORT
   purple "vless-argo 使用端口: $PORT"
 }
 step "检测可用端口"
@@ -596,7 +462,7 @@ check_port
 
 # ---------------------------------------------------------------
 # 统一判断 ARGO_AUTH 属于哪种模式,避免同一个正则/关键字判断在
-# argo_configure / start_services(serv00) / start_services(VPS) 三处重复。
+# argo_configure / start_services 两处重复。
 #   token        : Cloudflare Zero Trust 后台生成的 Tunnel Token(纯 base64 风格长字符串)
 #   tunnelsecret : cloudflared tunnel create 生成的 JSON 凭证(含 TunnelSecret 字段)
 #   quick        : 未设置 ARGO_AUTH/ARGO_DOMAIN,退回临时隧道
@@ -669,139 +535,71 @@ step "配置 Argo 隧道"
 argo_configure
 
 # ---------------------------------------------------------------
-# 下载核心程序
-#   serv00: 沿用原先的 freebsd 二进制(eooce/test)
-#   vps   : 官方 XTLS/Xray-core + cloudflare/cloudflared
+# 下载核心程序: 官方 XTLS/Xray-core + cloudflare/cloudflared
 # ---------------------------------------------------------------
 download_binaries() {
   ARCH=$(uname -m)
   cd "$BIN_DIR" || exit 1
 
-  if [ "$PLATFORM" = "serv00" ]; then
-    if [[ "$ARCH" =~ ^(arm|arm64|aarch64)$ ]]; then
-        BASE_URL="https://github.com/eooce/test/releases/download/freebsd-arm64"
-    else
-        BASE_URL="https://github.com/eooce/test/releases/download/freebsd"
-    fi
+  case "$ARCH" in
+      x86_64|amd64) XARCH="64"; CF_ARCH="amd64" ;;
+      aarch64|arm64) XARCH="arm64-v8a"; CF_ARCH="arm64" ;;
+      *) red "不支持的架构: $ARCH"; exit 1 ;;
+  esac
 
-    if [ -x "${BIN_DIR}/web" ] && [ "$FORCE_REDOWNLOAD" != "1" ]; then
-        green "web 已存在,跳过下载(如需强制重下载,用 update 子命令或设置 FORCE_REDOWNLOAD=1)"
-    else
-        purple "正在下载 web(xray)..."
-        fetch_with_retry "${BASE_URL}/web" "${BIN_DIR}/web" || exit 1
-        chmod +x "${BIN_DIR}/web"
-    fi
-    if [ -x "${BIN_DIR}/bot" ] && [ "$FORCE_REDOWNLOAD" != "1" ]; then
-        green "bot 已存在,跳过下载"
-    else
-        purple "正在下载 bot(cloudflared)..."
-        fetch_with_retry "${BASE_URL}/server" "${BIN_DIR}/bot" || exit 1
-        chmod +x "${BIN_DIR}/bot"
-    fi
-    XRAY_BIN="${BIN_DIR}/web"
-    CLOUDFLARED_BIN="${BIN_DIR}/bot"
+  if [ -x "${BIN_DIR}/xray-core/xray" ] && [ "$FORCE_REDOWNLOAD" != "1" ]; then
+      green "xray 已存在,跳过下载(如需强制重下载,用 update 子命令或设置 FORCE_REDOWNLOAD=1)"
   else
-    case "$ARCH" in
-        x86_64|amd64) XARCH="64"; CF_ARCH="amd64" ;;
-        aarch64|arm64) XARCH="arm64-v8a"; CF_ARCH="arm64" ;;
-        *) red "不支持的架构: $ARCH"; exit 1 ;;
-    esac
+      purple "正在查询 Xray-core 最新版本号(GitHub API)..."
+      fetch_with_retry "https://api.github.com/repos/XTLS/Xray-core/releases/latest" "${BIN_DIR}/xray_latest.json" || exit 1
+      XRAY_VER=$(grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' "${BIN_DIR}/xray_latest.json" | head -n1 | cut -d'"' -f4)
+      rm -f "${BIN_DIR}/xray_latest.json"
+      [ -z "$XRAY_VER" ] && { red "获取 Xray-core 版本号失败(可能是 GitHub API 限流或网络问题),请检查网络后重试"; exit 1; }
 
-    if [ -x "${BIN_DIR}/xray-core/xray" ] && [ "$FORCE_REDOWNLOAD" != "1" ]; then
-        green "xray 已存在,跳过下载(如需强制重下载,用 update 子命令或设置 FORCE_REDOWNLOAD=1)"
-    else
-        purple "正在查询 Xray-core 最新版本号(GitHub API)..."
-        fetch_with_retry "https://api.github.com/repos/XTLS/Xray-core/releases/latest" "${BIN_DIR}/xray_latest.json" || exit 1
-        XRAY_VER=$(grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' "${BIN_DIR}/xray_latest.json" | head -n1 | cut -d'"' -f4)
-        rm -f "${BIN_DIR}/xray_latest.json"
-        [ -z "$XRAY_VER" ] && { red "获取 Xray-core 版本号失败(可能是 GitHub API 限流或网络问题),请检查网络后重试"; exit 1; }
+      purple "正在下载 Xray-core ${XRAY_VER} (约10-20MB,视网络情况需要几秒到几十秒)..."
+      fetch_with_retry "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-${XARCH}.zip" "${BIN_DIR}/xray.zip" || exit 1
 
-        purple "正在下载 Xray-core ${XRAY_VER} (约10-20MB,视网络情况需要几秒到几十秒)..."
-        fetch_with_retry "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-${XARCH}.zip" "${BIN_DIR}/xray.zip" || exit 1
+      # 校验和验证:需要本机有 sha256sum 且能拿到官方 .dgst 摘要文件,任一条件不满足则跳过校验(不阻断部署,只是降级为无校验下载)
+      purple "正在校验 Xray-core 完整性..."
+      if command -v sha256sum >/dev/null 2>&1 && fetch_with_retry "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-${XARCH}.zip.dgst" "${BIN_DIR}/xray.zip.dgst"; then
+          expected_sha256=$(grep -i '^SHA256' "${BIN_DIR}/xray.zip.dgst" | awk '{print $NF}')
+          actual_sha256=$(sha256sum "${BIN_DIR}/xray.zip" | awk '{print $1}')
+          if [ -n "$expected_sha256" ] && [ "$expected_sha256" != "$actual_sha256" ]; then
+              red "Xray-core 压缩包 sha256 校验失败!预期 ${expected_sha256},实际 ${actual_sha256}。为安全起见终止部署。"
+              exit 1
+          elif [ -n "$expected_sha256" ]; then
+              green "Xray-core sha256 校验通过"
+          fi
+      else
+          yellow "本机无 sha256sum 或未能获取官方校验和文件,跳过完整性校验(不影响部署,但建议人工确认下载来源可信)"
+      fi
 
-        # 校验和验证:需要本机有 sha256sum 且能拿到官方 .dgst 摘要文件,任一条件不满足则跳过校验(不阻断部署,只是降级为无校验下载)
-        purple "正在校验 Xray-core 完整性..."
-        if command -v sha256sum >/dev/null 2>&1 && fetch_with_retry "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-${XARCH}.zip.dgst" "${BIN_DIR}/xray.zip.dgst"; then
-            expected_sha256=$(grep -i '^SHA256' "${BIN_DIR}/xray.zip.dgst" | awk '{print $NF}')
-            actual_sha256=$(sha256sum "${BIN_DIR}/xray.zip" | awk '{print $1}')
-            if [ -n "$expected_sha256" ] && [ "$expected_sha256" != "$actual_sha256" ]; then
-                red "Xray-core 压缩包 sha256 校验失败!预期 ${expected_sha256},实际 ${actual_sha256}。为安全起见终止部署。"
-                exit 1
-            elif [ -n "$expected_sha256" ]; then
-                green "Xray-core sha256 校验通过"
-            fi
-        else
-            yellow "本机无 sha256sum 或未能获取官方校验和文件,跳过完整性校验(不影响部署,但建议人工确认下载来源可信)"
-        fi
-
-        command -v unzip >/dev/null 2>&1 || (apt-get update -y && apt-get install -y unzip) >/dev/null 2>&1 || yum install -y unzip >/dev/null 2>&1 || apk add --no-cache unzip >/dev/null 2>&1
-        mkdir -p "${BIN_DIR}/xray-core"
-        unzip -o "${BIN_DIR}/xray.zip" -d "${BIN_DIR}/xray-core" >/dev/null && rm -f "${BIN_DIR}/xray.zip" "${BIN_DIR}/xray.zip.dgst"
-        chmod +x "${BIN_DIR}/xray-core/xray"
-    fi
-    XRAY_BIN="${BIN_DIR}/xray-core/xray"
-
-    if [ -x "${BIN_DIR}/cloudflared" ] && [ "$FORCE_REDOWNLOAD" != "1" ]; then
-        green "cloudflared 已存在,跳过下载"
-    else
-        purple "正在下载 cloudflared (约40-50MB,是本脚本里最大的一个文件,请耐心等待)..."
-        fetch_with_retry "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" "${BIN_DIR}/cloudflared" || exit 1
-        chmod +x "${BIN_DIR}/cloudflared"
-    fi
-    CLOUDFLARED_BIN="${BIN_DIR}/cloudflared"
+      command -v unzip >/dev/null 2>&1 || (apt-get update -y && apt-get install -y unzip) >/dev/null 2>&1 || yum install -y unzip >/dev/null 2>&1 || apk add --no-cache unzip >/dev/null 2>&1
+      mkdir -p "${BIN_DIR}/xray-core"
+      unzip -o "${BIN_DIR}/xray.zip" -d "${BIN_DIR}/xray-core" >/dev/null && rm -f "${BIN_DIR}/xray.zip" "${BIN_DIR}/xray.zip.dgst"
+      chmod +x "${BIN_DIR}/xray-core/xray"
   fi
+  XRAY_BIN="${BIN_DIR}/xray-core/xray"
+
+  if [ -x "${BIN_DIR}/cloudflared" ] && [ "$FORCE_REDOWNLOAD" != "1" ]; then
+      green "cloudflared 已存在,跳过下载"
+  else
+      purple "正在下载 cloudflared (约40-50MB,是本脚本里最大的一个文件,请耐心等待)..."
+      fetch_with_retry "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" "${BIN_DIR}/cloudflared" || exit 1
+      chmod +x "${BIN_DIR}/cloudflared"
+  fi
+  CLOUDFLARED_BIN="${BIN_DIR}/cloudflared"
 }
 step "下载并校验核心程序(网络耗时最长的一步,请耐心等待)"
 download_binaries
 
 # ---------------------------------------------------------------
 # WARP 出站: 平台能力检测
-#   VPS   : 官方 Xray-core v1.8+ 默认内置 wireguard outbound,直接放行
-#   serv00: eooce/test 是第三方重命名的 freebsd 二进制,协议支持情况未知,
-#           不能假设它和官方行为一致,必须用 -test 校验模式实测一份最小 wireguard 配置。
-#           探测本身失败(比如二进制根本不认 -test 这个参数)时,出于稳妥也当作不支持处理,
-#           而不是冒险继续——这是可选增强功能,宁可关掉也不要让它拖垮整个安装。
+#   官方 Xray-core v1.8+ 默认内置 wireguard outbound,直接放行
 # ---------------------------------------------------------------
 check_warp_supported() {
     [ "$WARP" = "1" ] || return 0
-
-    if [ "$PLATFORM" = "vps" ]; then
-        return 0
-    fi
-
-    purple "正在检测当前 serv00 二进制是否支持 WARP(wireguard outbound)..."
-    local test_conf="${BIN_DIR}/.warp_probe.json" probe_out
-    cat > "$test_conf" <<'EOF'
-{
-  "outbounds": [
-    {
-      "protocol": "wireguard",
-      "tag": "warp-probe",
-      "settings": {
-        "secretKey": "wIol6i8Wl4Wp+i6PXVXwZBoTr6Ez2FZ3+Rjez7cvvV0=",
-        "address": ["172.16.0.2/32"],
-        "peers": [
-          { "publicKey": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=", "endpoint": "162.159.192.1:2408" }
-        ]
-      }
-    }
-  ]
-}
-EOF
-    probe_out=$("${BIN_DIR}/web" run -test -c "$test_conf" 2>&1)
-    rm -f "$test_conf"
-
-    if echo "$probe_out" | grep -qiE "unknown (outbound )?protocol|not registered|invalid protocol|unknown config"; then
-        red "当前 serv00 平台使用的二进制不支持 WARP(wireguard)出站,已自动关闭 WARP,其余部分正常安装"
-        export WARP=0
-        return 1
-    fi
-    if echo "$probe_out" | grep -qiE "flag provided but not defined|unknown (flag|command)|no such (flag|command)"; then
-        red "当前 serv00 二进制不支持 -test 配置校验模式,无法安全确认 WARP 是否受支持,出于稳妥考虑已自动关闭 WARP"
-        export WARP=0
-        return 1
-    fi
-    green "WARP(wireguard outbound)探测通过"
+    return 0
 }
 
 # ---------------------------------------------------------------
@@ -1142,54 +940,18 @@ step "生成节点配置"
 generate_config
 
 # ---------------------------------------------------------------
-# 启动服务
-#   serv00: nohup 后台进程(受共享主机限制,无 systemd 权限)
-#   vps   : systemd 服务,自带开机自启 + 崩溃重启
+# 启动服务: systemd 服务,自带开机自启 + 崩溃重启(Alpine 等无 systemd 则用 OpenRC)
 # ---------------------------------------------------------------
 start_services() {
-  if [ "$PLATFORM" = "serv00" ]; then
-    cd "$BIN_DIR" || exit 1
-    nohup ./web -c config.json >/dev/null 2>&1 &
-    echo $! > "${BIN_DIR}/web.pid"
-    sleep 2
-    if pgrep -f "web -c config.json" >/dev/null; then
-        green "xray(web) 运行中"
-    else
-        red "xray(web) 未运行,重试中..."
-        [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid")" >/dev/null 2>&1
-        nohup ./web -c config.json >/dev/null 2>&1 &
-        echo $! > "${BIN_DIR}/web.pid"
-        sleep 2
-    fi
+  detect_argo_mode
+  case "$ARGO_MODE" in
+      token)        cf_args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 run --token ${ARGO_AUTH}" ;;
+      tunnelsecret) cf_args="tunnel --edge-ip-version auto --config ${BIN_DIR}/tunnel.yml run" ;;
+      *)            cf_args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile ${WORKDIR}/boot.log --loglevel info --url http://localhost:${PORT}" ;;
+  esac
 
-    detect_argo_mode
-    case "$ARGO_MODE" in
-        token)        args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 run --token ${ARGO_AUTH}" ;;
-        tunnelsecret) args="tunnel --edge-ip-version auto --config ${BIN_DIR}/tunnel.yml run" ;;
-        *)            args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile ${WORKDIR}/boot.log --loglevel info --url http://localhost:$PORT" ;;
-    esac
-    nohup ./bot $args >/dev/null 2>&1 &
-    echo $! > "${BIN_DIR}/bot.pid"
-    sleep 2
-    if pgrep -f "bot" >/dev/null; then
-        green "cloudflared(bot) 运行中"
-    else
-        red "cloudflared(bot) 未运行,重试中..."
-        [ -f "${BIN_DIR}/bot.pid" ] && kill -9 "$(cat "${BIN_DIR}/bot.pid")" >/dev/null 2>&1
-        nohup ./bot $args >/dev/null 2>&1 &
-        echo $! > "${BIN_DIR}/bot.pid"
-        sleep 2
-    fi
-  else
-    detect_argo_mode
-    case "$ARGO_MODE" in
-        token)        cf_args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 run --token ${ARGO_AUTH}" ;;
-        tunnelsecret) cf_args="tunnel --edge-ip-version auto --config ${BIN_DIR}/tunnel.yml run" ;;
-        *)            cf_args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile ${WORKDIR}/boot.log --loglevel info --url http://localhost:${PORT}" ;;
-    esac
-
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        cat > /etc/systemd/system/xray-argo.service << EOF
+  if [ "$INIT_SYSTEM" = "systemd" ]; then
+    cat > /etc/systemd/system/xray-argo.service << EOF
 [Unit]
 Description=Xray VLESS-WS Service
 After=network.target
@@ -1280,7 +1042,6 @@ EOF
         rc-service xray-argo status 2>/dev/null | grep -q started && green "xray-argo (OpenRC) 运行中" || red "xray-argo (OpenRC) 启动失败,请查看 ${WORKDIR}/xray.err.log"
         rc-service cloudflared-argo status 2>/dev/null | grep -q started && green "cloudflared-argo (OpenRC) 运行中" || red "cloudflared-argo (OpenRC) 启动失败,请查看 ${WORKDIR}/cloudflared.err.log"
     fi
-  fi
 }
 step "启动服务"
 start_services
@@ -1310,7 +1071,7 @@ get_argodomain() {
 #   - 生成独立的 healthcheck.sh,定时探测 xray/cloudflared 是否存活
 #   - 只在状态变化时(正常->异常 / 异常->恢复)推送消息,不会每次检查都刷屏
 #   - 检测到异常先自动尝试重启,重启成功/失败的结果一并发送
-#   - 调度: VPS 有 systemd 就用 systemd timer,serv00 和 OpenRC(Alpine)用标准 crontab
+#   - 调度: 有 systemd 就用 systemd timer,OpenRC(Alpine)用标准 crontab
 #   - 卸载(de)时由前面定义的 remove_healthcheck_schedule 统一清理,不留定时任务垃圾
 # ---------------------------------------------------------------
 install_healthcheck() {
@@ -1404,9 +1165,7 @@ is_port_open() {
 # xray 是否真正可用:进程/服务存活是前提,但存活不代表能用(配置错、内部异常都可能导致端口没起来),
 # 所以额外加一层本地端口连通性探测,两者都过才算真的"up"
 is_alive_xray() {
-    if [ "$PLATFORM" = "serv00" ]; then
-        [ -f "${BIN_DIR}/web.pid" ] && kill -0 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1 || return 1
-    elif [ "$INIT_SYSTEM" = "systemd" ]; then
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
         systemctl is-active --quiet xray-argo || return 1
     else
         rc-service xray-argo status 2>/dev/null | grep -q started || return 1
@@ -1415,9 +1174,7 @@ is_alive_xray() {
 }
 
 is_alive_cf() {
-    if [ "$PLATFORM" = "serv00" ]; then
-        [ -f "${BIN_DIR}/bot.pid" ] && kill -0 "$(cat "${BIN_DIR}/bot.pid" 2>/dev/null)" >/dev/null 2>&1
-    elif [ "$INIT_SYSTEM" = "systemd" ]; then
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
         systemctl is-active --quiet cloudflared-argo
     else
         rc-service cloudflared-argo status 2>/dev/null | grep -q started
@@ -1425,10 +1182,7 @@ is_alive_cf() {
 }
 
 restart_xray() {
-    if [ "$PLATFORM" = "serv00" ]; then
-        [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1
-        ( cd "$BIN_DIR" && nohup ./web -c config.json >/dev/null 2>&1 & echo $! > "${BIN_DIR}/web.pid" )
-    elif [ "$INIT_SYSTEM" = "systemd" ]; then
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
         systemctl restart xray-argo >/dev/null 2>&1
     else
         rc-service xray-argo restart >/dev/null 2>&1
@@ -1438,10 +1192,7 @@ restart_xray() {
 }
 
 restart_cf() {
-    if [ "$PLATFORM" = "serv00" ]; then
-        [ -f "${BIN_DIR}/bot.pid" ] && kill -9 "$(cat "${BIN_DIR}/bot.pid" 2>/dev/null)" >/dev/null 2>&1
-        ( cd "$BIN_DIR" && nohup ./bot ${SAVED_BOT_ARGS} >/dev/null 2>&1 & echo $! > "${BIN_DIR}/bot.pid" )
-    elif [ "$INIT_SYSTEM" = "systemd" ]; then
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
         systemctl restart cloudflared-argo >/dev/null 2>&1
     else
         rc-service cloudflared-argo restart >/dev/null 2>&1
@@ -1590,52 +1341,6 @@ EOF
 }
 
 # ---------------------------------------------------------------
-# serv00 专属:全自动保活服务(VPS 用 systemd 自带保活,无需此步骤)
-# ---------------------------------------------------------------
-install_keepalive() {
-    [ "$PLATFORM" != "serv00" ] && return
-    purple "正在安装保活服务中,请稍等......"
-    devil www del "keep.${USERNAME}.${CURRENT_DOMAIN}" > /dev/null 2>&1
-    devil www add "keep.${USERNAME}.${CURRENT_DOMAIN}" nodejs /usr/local/bin/node18 > /dev/null 2>&1
-    keep_path="$HOME/domains/keep.${USERNAME}.${CURRENT_DOMAIN}/public_nodejs"
-    [ -d "$keep_path" ] || mkdir -p "$keep_path"
-    purple "正在下载保活脚本..."
-    fetch_with_retry "https://xray.ssss.nyc.mn/vmess.js" "${keep_path}/app.js"
-
-    cat > "${keep_path}/.env" <<EOF
-UUID=${UUID}
-CFIP=${CFIP}
-CFPORT=${CFPORT}
-SUB_TOKEN=${SUB_TOKEN}
-ARGO_DOMAIN=${ARGO_DOMAIN}
-ARGO_AUTH=$([[ -z "$ARGO_AUTH" ]] && echo "" || ([[ "$ARGO_AUTH" =~ ^\{.* ]] && echo "'$ARGO_AUTH'" || echo "$ARGO_AUTH"))
-EOF
-    devil www add "${USERNAME}.${CURRENT_DOMAIN}" php > /dev/null 2>&1
-    [ -f "${FILE_PATH}/index.html" ] || fetch_with_retry "https://github.com/eooce/Sing-box/releases/download/00/index.html" "${FILE_PATH}/index.html"
-    ln -fs /usr/local/bin/node18 ~/bin/node > /dev/null 2>&1
-    ln -fs /usr/local/bin/npm18 ~/bin/npm > /dev/null 2>&1
-    mkdir -p ~/.npm-global
-    npm config set prefix '~/.npm-global'
-    echo 'export PATH=~/.npm-global/bin:~/bin:$PATH' >> "$HOME/.bash_profile" && source "$HOME/.bash_profile"
-    rm -rf "$HOME/.npmrc" > /dev/null 2>&1
-    purple "正在安装 npm 依赖(dotenv/axios),共享主机上这一步可能比较慢..."
-    (cd "${keep_path}" && npm install dotenv axios --silent > /dev/null 2>&1)
-    rm -f "$HOME/domains/keep.${USERNAME}.${CURRENT_DOMAIN}/public_nodejs/public/index.html" > /dev/null 2>&1
-    devil www restart "keep.${USERNAME}.${CURRENT_DOMAIN}" > /dev/null 2>&1
-    check_url="http://keep.${USERNAME}.${CURRENT_DOMAIN}/${USERNAME}"
-    if [ "$HAVE_CURL" = 1 ]; then
-        check_result=$(curl -skL "$check_url")
-    else
-        check_result=$(wget -qO- "$check_url")
-    fi
-    if echo "$check_result" | grep -q "running"; then
-        green "全自动保活服务安装成功"
-    else
-        red "保活服务安装可能未成功,请访问 http://keep.${USERNAME}.${CURRENT_DOMAIN}/status 检查"
-    fi
-}
-
-# ---------------------------------------------------------------
 # 生成订阅链接(vless://)
 # ---------------------------------------------------------------
 generate_links() {
@@ -1650,7 +1355,7 @@ generate_links() {
 
   # Reality 直连节点是独立于 Argo 的第二个节点,不走隧道,不需要域名,用公网IP拼接;
   # 只在本次实际生效(REALITY_PORT 有值且密钥齐全)时才生成,关闭状态下不追加
-  if [ "$PLATFORM" = "vps" ] && [ -n "$REALITY_PORT" ] && [ -n "$REALITY_PUBLIC_KEY" ]; then
+  if [ -n "$REALITY_PORT" ] && [ -n "$REALITY_PUBLIC_KEY" ]; then
     local pub_ip reality_link
     pub_ip=$(get_public_ip)
     if [ -n "$pub_ip" ]; then
@@ -1663,18 +1368,9 @@ generate_links() {
     fi
   fi
 
-  if [ "$PLATFORM" = "serv00" ]; then
-    green "\n订阅链接: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_vless.log\n"
-    # 注意: 这里只删 boot.log(避免重启cloudflared后读到旧的隧道域名)。
-    # config.json/tunnel.json/tunnel.yml 不能删——心跳监控掉线自动重启时(./web -c config.json / ./bot --config tunnel.yml)还需要用到它们。
-    rm -rf "${WORKDIR}/boot.log"
-    step "安装保活服务"
-    install_keepalive
-  else
-    green "\n节点信息已保存到: ${FILE_PATH}/${SUB_TOKEN}_vless.log"
-    yellow "VPS 模式下服务由 systemd 托管(xray-argo / cloudflared-argo),无需额外保活。"
-    yellow "如需通过域名访问该订阅文件,请自行用 Nginx/Caddy 反代 ${FILE_PATH} 目录。\n"
-  fi
+  green "\n节点信息已保存到: ${FILE_PATH}/${SUB_TOKEN}_vless.log"
+  yellow "服务由 systemd 托管(xray-argo / cloudflared-argo),无需额外保活。"
+  yellow "如需通过域名访问该订阅文件,请自行用 Nginx/Caddy 反代 ${FILE_PATH} 目录。\n"
 }
 step "生成订阅链接"
 generate_links
