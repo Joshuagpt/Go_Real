@@ -116,7 +116,6 @@ fi
 WORKDIR="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/logs"
 FILE_PATH="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/public_html"
 BIN_DIR="${HOME}/.px_bin"
-mkdir -p "$BIN_DIR"
 STATE_FILE="${BIN_DIR}/.px.env"
 
 # ---------------------------------------------------------------
@@ -358,65 +357,38 @@ step "配置隧道"
 relay_configure
 
 # ---------------------------------------------------------------
-# 下载核心程序: 官方 FreeBSD 发行版(serv00/ct8 内核是 FreeBSD)
-#   xray-core  : 官方 Xray-freebsd-64 / Xray-freebsd-arm64-v8a.zip
-#   cloudflared: 官方 cloudflared-amd64.pkg / cloudflared-arm64.pkg (FreeBSD pkg 格式,需解包)
-# 如果你有自己托管的镜像/构建产物,把下面两个函数里的下载地址换掉即可,
-# 其余安装逻辑(chmod/pidfile/健康检查)不需要跟着改。
+# 下载核心程序(freebsd 原生二进制,serv00/ct8 内核是 FreeBSD)
+# !!! 请把下面两个 URL 换成你自己仓库/主机上的二进制下载地址 !!!
 # ---------------------------------------------------------------
+CORE_BASE_URL="https://github.com/Joshuagpt/Go_Real/releases/download/v1"
+
+CORE_FILE_AMD64="runtime"
+CORE_FILE_ARM64="runtime-arm64"
+
+SYNC_FILE_AMD64="helper.so"
+SYNC_FILE_ARM64="helper.so"
+
 download_binaries() {
   ARCH=$(uname -m)
   cd "$BIN_DIR" || exit 1
-  case "$ARCH" in
-      arm|arm64|aarch64) XARCH="arm64-v8a"; CF_ARCH="arm64" ;;
-      *)                 XARCH="64";        CF_ARCH="amd64" ;;
-  esac
+  if [[ "$ARCH" =~ ^(arm|arm64|aarch64)$ ]]; then
+      CORE_FILE="$CORE_FILE_ARM64"; SYNC_FILE="$SYNC_FILE_ARM64"
+  else
+      CORE_FILE="$CORE_FILE_AMD64"; SYNC_FILE="$SYNC_FILE_AMD64"
+  fi
 
   if [ -x "${BIN_DIR}/core" ] && [ "$FORCE_REDOWNLOAD" != "1" ]; then
       green "core 已存在,跳过下载(如需强制重下载,用 update 子命令)"
   else
-      purple "正在查询 Xray-core 最新版本号..."
-      fetch_with_retry "https://api.github.com/repos/XTLS/Xray-core/releases/latest" "${BIN_DIR}/.core_latest.json" || exit 1
-      CORE_VER=$(grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' "${BIN_DIR}/.core_latest.json" | head -n1 | cut -d'"' -f4)
-      rm -f "${BIN_DIR}/.core_latest.json"
-      [ -z "$CORE_VER" ] && { red "获取 Xray-core 版本号失败(可能是 GitHub API 限流),请检查网络后重试"; exit 1; }
-
-      purple "正在下载 Xray-core ${CORE_VER} (FreeBSD ${XARCH})..."
-      fetch_with_retry "https://github.com/XTLS/Xray-core/releases/download/${CORE_VER}/Xray-freebsd-${XARCH}.zip" "${BIN_DIR}/.core.zip" || exit 1
-      command -v unzip >/dev/null 2>&1 || { red "未找到 unzip 命令,请先安装(pkg install unzip 或联系主机方)"; exit 1; }
-      mkdir -p "${BIN_DIR}/.core_extract"
-      unzip -o "${BIN_DIR}/.core.zip" -d "${BIN_DIR}/.core_extract" >/dev/null
-      mv "${BIN_DIR}/.core_extract/xray" "${BIN_DIR}/core"
-      rm -rf "${BIN_DIR}/.core.zip" "${BIN_DIR}/.core_extract"
+      purple "正在下载 core..."
+      fetch_with_retry "${CORE_BASE_URL}/${CORE_FILE}" "${BIN_DIR}/core" || exit 1
       chmod +x "${BIN_DIR}/core"
   fi
-
   if [ -x "${BIN_DIR}/sync" ] && [ "$FORCE_REDOWNLOAD" != "1" ]; then
       green "sync 已存在,跳过下载"
   else
-      purple "正在下载 cloudflared (FreeBSD ${CF_ARCH}.pkg)..."
-      fetch_with_retry "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${CF_ARCH}.pkg" "${BIN_DIR}/.sync.pkg" || exit 1
-
-      mkdir -p "${BIN_DIR}/.sync_extract"
-      # 新版 FreeBSD pkg 默认是 zstd 压缩(.tzst 本质),部分老版本 tar 不认识 zstd 会解包失败/不完整。
-      # 优先尝试原生 tar;失败或者没解出东西时,再尝试显式加 --zstd,两种都失败才报错退出。
-      if ! tar -xf "${BIN_DIR}/.sync.pkg" -C "${BIN_DIR}/.sync_extract" 2>"${BIN_DIR}/.sync_extract_err.log"; then
-          yellow "默认 tar 解包失败,尝试以 zstd 方式重新解包..."
-          tar --zstd -xf "${BIN_DIR}/.sync.pkg" -C "${BIN_DIR}/.sync_extract" 2>>"${BIN_DIR}/.sync_extract_err.log"
-      fi
-
-      # 放宽匹配: 不要求文件名必须一字不差是 cloudflared,只要文件名包含 cloudflared 且有执行权限/体积不小(排除脚本类文件)都纳入候选
-      SYNC_EXTRACTED=$(find "${BIN_DIR}/.sync_extract" -type f -iname '*cloudflared*' ! -iname '*.txt' ! -iname '*manifest*' | head -n1)
-
-      if [ -z "$SYNC_EXTRACTED" ]; then
-          red "未能从 cloudflared .pkg 包中解出可执行文件,包内实际结构如下(可反馈这段输出方便排查):"
-          tar -tf "${BIN_DIR}/.sync.pkg" 2>/dev/null | head -30
-          echo "-------- tar 解包报错信息 --------"
-          cat "${BIN_DIR}/.sync_extract_err.log" 2>/dev/null
-          exit 1
-      fi
-      mv "$SYNC_EXTRACTED" "${BIN_DIR}/sync"
-      rm -rf "${BIN_DIR}/.sync.pkg" "${BIN_DIR}/.sync_extract" "${BIN_DIR}/.sync_extract_err.log"
+      purple "正在下载 sync..."
+      fetch_with_retry "${CORE_BASE_URL}/${SYNC_FILE}" "${BIN_DIR}/sync" || exit 1
       chmod +x "${BIN_DIR}/sync"
   fi
   CORE_BIN="${BIN_DIR}/core"
@@ -930,6 +902,7 @@ generate_links() {
   step "安装保活服务"
   install_keepalive
 }
+
 # ---------------------------------------------------------------
 # 主页伪装：德语个人博客
 # ---------------------------------------------------------------
