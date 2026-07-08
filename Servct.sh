@@ -448,7 +448,22 @@ signal.signal(signal.SIGINT, _graceful_stop)
 
 payload = json.dumps({"args": tunnel_args}).encode("utf-8")
 rc = lib.StartCloudflared(payload)
-sys.exit(rc if isinstance(rc, int) else 0)
+if rc != 0:
+    # StartCloudflared 参数校验失败/致命错误时会同步返回非0,这种情况不需要保活,直接退出让上层重试逻辑接管
+    sys.exit(rc)
+
+# StartCloudflared 是"发射后不管"型调用: 它只是把隧道连接相关的 goroutine
+# 启动起来就立刻返回 rc=0,真正的连接建立/保活/重连全部在后台 goroutine 里跑。
+# 这些 goroutine 和本进程共享同一个地址空间,本进程一退出它们就被一起回收,
+# 所以必须让本进程一直存活,不能在拿到 rc 之后就直接结束。
+try:
+    while True:
+        signal.pause()
+except AttributeError:
+    # 部分平台没有 signal.pause,退化成轮询睡眠
+    import time
+    while True:
+        time.sleep(3600)
 PYEOF
 chmod +x "$CF_RUNNER"
 
