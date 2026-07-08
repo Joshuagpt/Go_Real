@@ -1008,12 +1008,15 @@ let relayBinPath = null;
 
 if (DISABLE_RELAY !== 'true' && DISABLE_RELAY !== true) {
 
+    // 目前 release 里只发布了单一的 `serv` 二进制(没有 arm64 变体)。
+    // 如果之后补发了 serv-arm64,再按 runtime 那样加 arch 判断即可。
+    if (arch === 'arm64') {
+      console.warn('当前 relay(serv) 二进制暂无 arm64 版本,继续尝试用通用版本下载,如启动异常请检查架构兼容性');
+    }
     relayBinPath =
     await downloadLibrary(
-        arch === 'arm64'
-            ? `${releaseBaseUrl}/relay-arm64`
-            : `${releaseBaseUrl}/relay`,
-        'relay'
+        `${releaseBaseUrl}/serv`,
+        'serv'
     );
 
     try {
