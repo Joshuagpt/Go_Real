@@ -488,8 +488,53 @@ chmod +x "$CF_RUNNER"
 # ---------------------------------------------------------------
 # WARP 出站(可选): 用 -test 校验模式实测二进制是否认识 wireguard 出站
 # ---------------------------------------------------------------
+# ---------------------------------------------------------------
+# WARP 依赖的是 UDP(WireGuard),而 serv00/ct8 这类共享主机经常只放行
+# TCP、直接丢弃 UDP 出站。之前只探测了 core 二进制"认不认识 wireguard
+# 这个协议格式"(check_warp_supported),从没探测过"UDP出站实际通不通"。
+# 结果就是: 格式探测能过、WARP身份也能注册成功(注册走的是TCP/HTTPS),
+# 但 config.json 里 wireguard-out 被设成默认出站后,握手用UDP发不出去,
+# 代理入口(隧道)本身完全正常、Cloudflare那边看隧道也是健康的,但所有
+# 流量卡在"发给WARP、WARP永远没握手成功"这一步,表现就是隧道通、节点不通。
+# 这里对齐 Servctx.sh(Node版本) 里 detectUdpEgress() 的做法:真实发一个
+# UDP包出去看有没有响应,不通就直接自动关闭WARP,不再往下折腾。
+# ---------------------------------------------------------------
+detect_udp_egress() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - <<'PYEOF'
+import socket, sys
+query = bytes([
+    0x12,0x34,0x01,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x0a,0x63,0x6c,0x6f,0x75,0x64,0x66,0x6c,0x61,0x72,0x65,
+    0x03,0x63,0x6f,0x6d,0x00,
+    0x00,0x01,0x00,0x01
+])
+for host, port in [("1.1.1.1", 53), ("8.8.8.8", 53)]:
+    s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(3)
+        s.sendto(query, (host, port))
+        s.recvfrom(512)
+        sys.exit(0)
+    except Exception:
+        pass
+    finally:
+        if s:
+            try: s.close()
+            except Exception: pass
+sys.exit(1)
+PYEOF
+}
+
 check_warp_supported() {
     [ "$WARP" = "1" ] || return 0
+    purple "正在检测本机出站 UDP 连通性(WireGuard 依赖 UDP)..."
+    if ! detect_udp_egress; then
+        red "本机不支持出站UDP(常见于serv00/ct8等共享主机限制),WireGuard无法工作,已自动关闭 WARP,其余部分正常安装"
+        export WARP=0; return 1
+    fi
+    green "UDP出站探测通过"
     purple "正在检测当前二进制是否支持 WARP(wireguard outbound)..."
     local test_conf="${BIN_DIR}/.warp_probe.json" probe_out
     cat > "$test_conf" <<'EOF'
