@@ -14,7 +14,7 @@ VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls ht
 
 > 
 
-<h2>- Delete&Cleanup</h2>
+<h2>▶ Delete&Cleanup</h2>
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh) de
