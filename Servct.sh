@@ -670,9 +670,16 @@ verify_warp_functional() {
     [ -n "$WARP_PRIVATE_KEY" ] && [ -n "$WARP_PEER_PUBLIC_KEY" ] || return 0
 
     purple "正在验证 WARP 出站是否真的可用(实际发一次请求,而不只是探测协议格式/通用UDP)..."
-    local test_port test_conf test_pid ok=0
+    local test_port test_conf test_pid ok=0 warp_addr_json
     test_port=$(shuf -i 20000-59999 -n 1)
     test_conf="${BIN_DIR}/.warp_verify.json"
+    # v4 补 /32、v6 为空时完全不写入(而不是塞一个 ::/128 假地址),
+    # 对齐 Servctx.sh 里 Node 版本的拼法,这两处正是之前 WARP 配不出来的根因
+    if [ -n "$WARP_ADDRESS_V6" ]; then
+        warp_addr_json="\"${WARP_ADDRESS_V4}/32\", \"${WARP_ADDRESS_V6}/128\""
+    else
+        warp_addr_json="\"${WARP_ADDRESS_V4}/32\""
+    fi
     cat > "$test_conf" <<EOF
 {
     "log": { "loglevel": "none" },
@@ -685,7 +692,7 @@ verify_warp_functional() {
             "tag": "warp-out",
             "settings": {
                 "secretKey": "${WARP_PRIVATE_KEY}",
-                "address": ["${WARP_ADDRESS_V4:-172.16.0.2/32}", "${WARP_ADDRESS_V6:-::/128}"],
+                "address": [${warp_addr_json}],
                 "peers": [
                     { "publicKey": "${WARP_PEER_PUBLIC_KEY}", "endpoint": "${WARP_ENDPOINT:-engage.cloudflareclient.com:2408}" }
                 ],
@@ -737,13 +744,22 @@ generate_config() {
         mv -f "$WARP_PROFILE" "${WARP_PROFILE}.corrupt.$(date +%s)" 2>/dev/null
     fi
     if [ -n "$WARP_PRIVATE_KEY" ] && [ -n "$WARP_PEER_PUBLIC_KEY" ]; then
+        local warp_addr_json
+        # v4 补 /32、v6 为空时完全不写入(而不是塞一个 ::/128 假地址),
+        # 对齐 Servctx.sh 里 Node 版本的拼法(address_v6 ? [v4/32, v6/128] : [v4/32]),
+        # 这两处正是之前"隧道健康但WARP流量走不通"的根因
+        if [ -n "$WARP_ADDRESS_V6" ]; then
+            warp_addr_json="\\\"${WARP_ADDRESS_V4}/32\\\", \\\"${WARP_ADDRESS_V6}/128\\\""
+        else
+            warp_addr_json="\\\"${WARP_ADDRESS_V4}/32\\\""
+        fi
         warp_outbound=",
         {
             \"protocol\": \"wireguard\",
             \"tag\": \"warp-out\",
             \"settings\": {
                 \"secretKey\": \"${WARP_PRIVATE_KEY}\",
-                \"address\": [\"${WARP_ADDRESS_V4:-172.16.0.2/32}\", \"${WARP_ADDRESS_V6:-::/128}\"],
+                \"address\": [${warp_addr_json}],
                 \"peers\": [
                     { \"publicKey\": \"${WARP_PEER_PUBLIC_KEY}\", \"endpoint\": \"${WARP_ENDPOINT:-engage.cloudflareclient.com:2408}\" }
                 ],
