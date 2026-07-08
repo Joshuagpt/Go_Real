@@ -6,7 +6,7 @@ VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls ht
 
 > 
 
-<h2>- Reload&Refresh</h2>
+<h2>▶ Reload&Refresh</h2>
 
 ```bash
 VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh) re
@@ -46,7 +46,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real
 
 > 
 
-<h2>- TG Bot</h2>          
+<h2>▶ TG Bot</h2>          
 
 ```bash
 TG_TOKEN="..." TG_ID="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh)
