@@ -52,18 +52,27 @@ bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real
 
 > 
 
-<h2>- TG Bot</h2>
+<h2>- TG Bot</h2>          
 
 ```bash
 TG_TOKEN="..." TG_ID="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh)
 ```
 >
 
-<h2>✅ servctx</h2>
+<h2>✅ servctx</h2>           
 
 
 ```bash
-UUID= bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/servctx.sh)
+UUID= bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Servctx.sh)
+```
+
+>
+
+<h2>✅ Go_Real_Servctx</h2>           
+
+
+```bash
+UUID= bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real_Servctx.sh)
 ```
 
 >
