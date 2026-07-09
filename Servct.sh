@@ -787,7 +787,7 @@ function cloudflaredPayload() {
 
 // ======================== 隧道域名检测 ========================
 
-function waitForQuickTunnelDomain(logPath, timeoutMs) {
+async function waitForQuickTunnelDomain(logPath, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -802,7 +802,10 @@ function waitForQuickTunnelDomain(logPath, timeoutMs) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     const sleepMs = Math.min(1000, remaining);
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, sleepMs);
+    // 注意: 这里必须用非阻塞的 setTimeout，不能用 Atomics.wait 同步阻塞主线程——
+    // 否则会连带冻结 HTTP server 和 engine 子进程的 stdout 事件循环，
+    // 拖慢/拖死 Passenger 认为的"进程已就绪"判定。
+    await new Promise(r => setTimeout(r, sleepMs));
   }
   return null;
 }
@@ -815,12 +818,12 @@ async function extractDomain() {
   }
   // Quick tunnel
   console.log('Waiting for quick tunnel domain in log...');
-  let domain = waitForQuickTunnelDomain(bootLogPath, 30000);
+  let domain = await waitForQuickTunnelDomain(bootLogPath, 30000);
   if (!domain) {
     console.log('Quick tunnel domain not found, retrying...');
     try { fs.unlinkSync(bootLogPath); } catch (e) { }
     await new Promise(r => setTimeout(r, 5000));
-    domain = waitForQuickTunnelDomain(bootLogPath, 30000);
+    domain = await waitForQuickTunnelDomain(bootLogPath, 30000);
   }
   if (domain) {
     console.log('RelayDomain:', domain + '\n');
@@ -879,7 +882,7 @@ async function generateLinks(relayDomain) {
 
 // ======================== HTTP 服务器 ========================
 
-function startHttpServer(subTxt) {
+function startHttpServer(state) {
   const server = http.createServer((req, res) => {
     if (req.method !== 'GET') {
       res.statusCode = 405;
@@ -888,8 +891,16 @@ function startHttpServer(subTxt) {
     }
     const url = new URL(req.url, `http://localhost`);
     if (url.pathname === subscribePath) {
+      if (!state.subTxt) {
+        // 节点链接还没生成完(隧道域名探测/下载依赖等还在跑)，先给个 202
+        // 而不是让 Passenger 因为端口没绑定而超时判死并反复重启进程
+        res.statusCode = 202;
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end('starting, please retry shortly');
+        return;
+      }
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      const encodedContent = Buffer.from(subTxt).toString('base64');
+      const encodedContent = Buffer.from(state.subTxt).toString('base64');
       res.end(encodedContent);
     } else if (url.pathname === '/') {
         try {
@@ -923,6 +934,15 @@ function startHttpServer(subTxt) {
 // ======================== 主流程 ========================
 
 async function startServer() {
+  // 0. 立刻绑定 HTTP 端口。Passenger 是靠"进程有没有把 PORT 端口监听起来"
+  //    来判断应用是否就绪的，之前把 server.listen 放在下载 helper.so / 探测
+  //    隧道域名(quick tunnel 最坏情况下要阻塞近 65 秒)之后，导致 Passenger
+  //    在端口还没绑定时就判超时、返回500，然后在下一次请求时重新 spawn 一个
+  //    全新的 app.js 进程——于是永远卡在"刚起步就被杀掉重启"的循环里。
+  //    现在先监听端口占住位置，节点信息用 state.subTxt 异步补上。
+  const httpState = { subTxt: '' };
+  startHttpServer(httpState);
+
   // 1. 创建运行目录 + 清理文件
   if (!fs.existsSync(FILE_PATH)) {
     fs.mkdirSync(FILE_PATH);
@@ -989,11 +1009,8 @@ if (DISABLE_RELAY !== 'true' && DISABLE_RELAY !== true) {
   await new Promise(r => setTimeout(r, 5000));
   const relayDomain = await extractDomain();
 
-  // 6. 生成节点链接
-  const subTxt = await generateLinks(relayDomain);
-
-  // 9. 启动 HTTP 服务器
-  startHttpServer(subTxt);
+  // 6. 生成节点链接(HTTP 服务器早在第0步就已经在监听了，这里只是把内容填进去)
+  httpState.subTxt = await generateLinks(relayDomain);
 
   setTimeout(() => {
     cleanupFiles({ keepSub: true });
