@@ -263,7 +263,6 @@ const libraryDir = runtimeFilePath;
 const engineConfigPath = path.resolve(runtimeFilePath, 'config.json');
 const warpConfigPath = path.resolve(runtimeFilePath, 'warp.json'); // 独立WARP身份持久化文件，注册一次后复用
 const bootLogPath = path.resolve(runtimeFilePath, 'boot.log');
-const progressFilePath = path.resolve(runtimeFilePath, 'progress.log'); // 下载进度,供 bash 安装脚本轮询展示给用户
 const subPath = path.resolve(runtimeFilePath, 'sub.txt');
 const listPath = path.resolve(runtimeFilePath, 'list.txt');
 const subscribePath = '/' + SUB_PATH.replace(/^\//, '');
@@ -651,40 +650,8 @@ async function downloadLibrary(url, fileName, expectedSha256) {
   if (response.status < 200 || response.status >= 300) {
     throw new Error(`Failed to download ${url}: HTTP ${response.status}`);
   }
-
-  // 下载进度: 按 content-length 计算百分比,节流写入进度文件(bash 安装脚本轮询读取展示给用户)
-  const totalBytes = Number(response.headers['content-length']) || 0;
-  let downloadedBytes = 0;
-  let lastWriteAt = 0;
-  let lastPercent = -1;
-  try {
-    fs.writeFileSync(progressFilePath, totalBytes
-      ? `${fileName}: 0% (0.0MB/${(totalBytes / 1048576).toFixed(1)}MB)`
-      : `${fileName}: 开始下载...`);
-  } catch (e) { /* ignore */ }
-
-  const writeProgress = (force) => {
-    const now = Date.now();
-    if (!force && now - lastWriteAt < 500) return; // 最多每500ms刷一次,避免频繁写文件
-    const percent = totalBytes ? Math.min(100, Math.floor((downloadedBytes / totalBytes) * 100)) : null;
-    if (!force && percent === lastPercent) return;
-    lastWriteAt = now;
-    lastPercent = percent;
-    const line = totalBytes
-      ? `${fileName}: ${percent}% (${(downloadedBytes / 1048576).toFixed(1)}MB/${(totalBytes / 1048576).toFixed(1)}MB)`
-      : `${fileName}: 已下载 ${(downloadedBytes / 1048576).toFixed(1)}MB (未知总大小)`;
-    try { fs.writeFileSync(progressFilePath, line); } catch (e) { /* ignore */ }
-  };
-
-  response.data.on('data', chunk => {
-    downloadedBytes += chunk.length;
-    writeProgress(false);
-  });
-
   response.data.pipe(writer);
   await new Promise((resolve, reject) => writer.on('finish', resolve).on('error', reject));
-  writeProgress(true);
-  try { fs.writeFileSync(progressFilePath, `${fileName}: 下载完成，正在校验...`); } catch (e) { /* ignore */ }
   if (!(await sha256Matches(tmp, expectedSha256))) {
     throw new Error(`SHA-256 mismatch for ${tmp}`);
   }
@@ -1377,45 +1344,19 @@ EOF
   npm config set prefix '~/.npm-global'
   echo 'export PATH=~/.npm-global/bin:~/bin:$PATH' >> $HOME/.bash_profile && source $HOME/.bash_profile
   rm -rf $HOME/.npmrc > /dev/null 2>&1
-  cd ${WORKDIR}
-  npm install dotenv axios koffi --silent > /dev/null 2>&1 &
-  npm_pid=$!
-  spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-  i=0
-  elapsed=0
-  while kill -0 $npm_pid 2>/dev/null; do
-    i=$(( (i+1) % ${#spin} ))
-    printf "\r${yellow}正在安装 npm 依赖 %s (已用时 %ss)${re}" "${spin:$i:1}" "$elapsed"
-    sleep 1
-    elapsed=$((elapsed+1))
-  done
-  wait $npm_pid
-  printf "\r\033[K"
-  green "npm 依赖安装完成(用时 ${elapsed}s)"
+  cd ${WORKDIR} && npm install dotenv axios koffi --silent > /dev/null 2>&1
   devil www restart ${USERNAME}.${CURRENT_DOMAIN} > /dev/null 2>&1
   # devil www restart 会重新生成 public/ 下的默认占位 index.html，覆盖掉我们之前删的那次；
   # 这里再清一次，确保根路径请求最终落到 app.js 而不是被这个占位页拦截
   rm -f "${WORKDIR}/public/index.html" > /dev/null 2>&1
 
   yellow "服务启动中，首次启动需要下载运行库，请耐心等待...."
-  PROGRESS_FILE="${WORKDIR}/.npm/progress.log"
   started=false
-  last_progress_line=""
-  for i in $(seq 1 40); do
+  for i in $(seq 1 15); do
     sleep 3
     # devil 每次 restart 都可能重新放回占位页，起服务的这段时间里持续清理，
     # 避免探测阶段命中占位页而不是真实的 app.js 响应
     rm -f "${WORKDIR}/public/index.html" > /dev/null 2>&1
-
-    # 展示 Node 侧写入的实时下载进度(百分比/已下载体积),文件不存在或内容未变化时不重复刷屏
-    if [[ -f "$PROGRESS_FILE" ]]; then
-      progress_line=$(cat "$PROGRESS_FILE" 2>/dev/null)
-      if [[ -n "$progress_line" && "$progress_line" != "$last_progress_line" ]]; then
-        purple "  [下载进度] ${progress_line}"
-        last_progress_line="$progress_line"
-      fi
-    fi
-
     code=$(curl -o /dev/null -m 3 -s -w "%{http_code}" https://${USERNAME}.${CURRENT_DOMAIN})
     if [[ "$code" == "200" ]]; then
       started=true
