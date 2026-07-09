@@ -704,6 +704,32 @@ function createService(name, libraryPath, startSymbol, stopSymbol, payload, rest
 // engine 现在是独立的 node 子进程(engine.js)，原因见 engine.js 顶部注释：
 // Phusion Passenger 的 auto-install 机制不允许同一个 Node 进程里出现第二次 .listen()。
 // 复用跟 cloudflared 一样的滑动窗口重启逻辑；崩溃只会影响这一个子进程，不牵连 Node 主进程。
+//
+// 关键点: engine.js 独立于 app.js 存在，正是为了让它不受 Passenger 因 idle 回收
+// app.js 主进程的影响——回收只发生在 app.js 身上，engine.js 作为脱离的子进程会
+// 继续存活并处理已建立的代理连接。如果这里无脑"发现有旧 pid 就杀掉重开"，
+// 就等于每次 app.js 被 Passenger 回收重启，都会连带打断所有正在用的代理连接
+// (对 WoW 这类长连接游戏流量尤其致命)。所以只有确认旧进程已经不在了，才清理;
+// 如果还活着，直接复用，不再新开一个。
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return false; // ESRCH: 进程不存在
+  }
+}
+
+function readStaleEnginePid() {
+  const pidFilePath = path.resolve(runtimeFilePath, 'engine.pid');
+  try {
+    const pid = Number(fs.readFileSync(pidFilePath, 'utf8').trim());
+    return pid || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function killStaleEngine() {
   const pidFilePath = path.resolve(runtimeFilePath, 'engine.pid');
   try {
@@ -722,6 +748,13 @@ function startEngine(enginePath) {
   const guard = createRestartGuard(5, 5 * 60 * 1000);
 
   function spawnOnce() {
+    const oldPid = readStaleEnginePid();
+    if (oldPid && isPidAlive(oldPid)) {
+      // 上一轮的 engine 还活着(大概率是 app.js 被 Passenger 回收重启，
+      // 但这个独立子进程没有被牵连)，直接复用，不打断正在跑的连接。
+      console.log(`engine: 复用仍存活的上一轮 engine 进程(PID ${oldPid})，不重新启动`);
+      return null;
+    }
     killStaleEngine();
     const startedAt = Date.now();
     const child = spawn(process.execPath, [enginePath], {
@@ -759,6 +792,7 @@ function startEngine(enginePath) {
 
   return spawnOnce();
 }
+
 
 // ======================== Cloudflared Payload ========================
 
