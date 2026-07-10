@@ -747,7 +747,7 @@ warp_live_test() {
 
     purple "正在用真实密钥对 WARP 做联通性实测(会依次尝试 ${#candidate_ports[@]} 个候选端口,每个约需3-5秒)..."
 
-    local port try_port test_conf test_log test_pid trace_out probe_port ok=1 last_reason=""
+    local port try_port test_conf test_log test_pid trace_out probe_port ok=1 last_reason="" last_log=""
     test_conf="${BIN_DIR}/.warp_live_test.json"
     test_log="${BIN_DIR}/.warp_live_test.log"
 
@@ -778,6 +778,7 @@ warp_live_test() {
 }
 EOF
 
+        : > "$test_log"
         ( cd "$BIN_DIR" && ./web -c "$test_conf" > "$test_log" 2>&1 & echo $! > "${BIN_DIR}/.warp_live_test.pid" )
 
         # 轮询等待本地探测端口真正监听,而不是固定 sleep,避免"xray还没就绪"被误判成"WARP不通"
@@ -799,6 +800,10 @@ EOF
         fi
 
         test_pid=$(cat "${BIN_DIR}/.warp_live_test.pid" 2>/dev/null)
+        # 判断进程这时候到底还活不活着,活着才代表是"跑起来了但没握手成功",
+        # 不活代表启动阶段就已经死了(这两种情况诊断结论完全不同,不能靠端口有没有监听来倒推)
+        local proc_alive=0
+        [ -n "$test_pid" ] && kill -0 "$test_pid" >/dev/null 2>&1 && proc_alive=1
         [ -n "$test_pid" ] && kill -9 "$test_pid" >/dev/null 2>&1
 
         if echo "$trace_out" | grep -q "warp=on"; then
@@ -812,11 +817,15 @@ EOF
             break
         fi
 
-        # 记录一下最后一次失败时本地端口是否起来了,便于最终给出更准确的判断
-        if [ "$waited" -ge 5 ]; then
-            last_reason="本地探测端口未能监听(xray 进程可能没跑起来,与 WARP 本身无关)"
+        # 记下 xray 自己在这次尝试里到底输出了什么(哪怕是空的),留到最后失败时一并打印出来,
+        # 不再单凭"端口有没有开"去猜原因——猜测不能代替 xray 自己的报错。
+        last_log=$(tail -c 2000 "$test_log" 2>/dev/null)
+        if [ "$proc_alive" -eq 0 ] && [ "$waited" -ge 5 ]; then
+            last_reason="进程在探测窗口内已经退出,且本地端口全程未监听(启动阶段就失败了,和 WARP 是否可达无关)"
+        elif [ "$waited" -ge 5 ]; then
+            last_reason="进程还活着,但本地端口一直没监听上(可能是这个版本二进制处理该配置的方式和预期不同)"
         else
-            last_reason="端口 ${try_port} 未拿到 warp=on 响应(WireGuard 握手大概率被出站防火墙拦截)"
+            last_reason="端口 ${try_port} 本地已监听,但没拿到 warp=on 响应(更像是 WireGuard 握手本身被拦截/超时)"
         fi
     done
 
@@ -828,6 +837,12 @@ EOF
 
     red "WARP 联通性测试失败: 已依次尝试 ${candidate_ports[*]} 共 ${#candidate_ports[@]} 个 UDP 端口,全部未能确认 warp=on。"
     red "最后一次失败原因: ${last_reason}"
+    if [ -n "$last_log" ]; then
+        red "xray 进程最后输出的原始日志(供排查,最多2000字节):"
+        echo "$last_log"
+    else
+        red "xray 进程本次没有任何标准输出/报错(在这个版本二进制上比较反常,值得注意)"
+    fi
     red "如果每个端口都是同样的失败表现,大概率是 serv00 这台机器的出站 UDP 被平台整体限制(FreeBSD jail 环境常见),不是配置问题;"
     red "可以登录 SSH 手动执行: nc -u -vz -w3 ${endpoint_host} 2408 (或其它候选端口)做进一步确认。"
     red "已自动关闭 WARP 并回退为直连出站,确保节点其余功能可用;WARP 凭据已保留,以后该限制解除后可直接复用,无需重新注册。"
