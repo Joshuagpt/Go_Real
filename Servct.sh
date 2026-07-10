@@ -140,8 +140,8 @@ else
 fi
 WORKDIR="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/logs"
 FILE_PATH="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/public_html"
-BIN_DIR="${HOME}/.vless_argo_bin"
-STATE_FILE="${BIN_DIR}/.vless_argo.env"
+BIN_DIR="${HOME}/.oceanus"
+STATE_FILE="${BIN_DIR}/.current.log"
 
 # ---------------------------------------------------------------
 # 状态持久化: install 时保存本次生效的关键参数,re/update/status 时读取,
@@ -182,8 +182,8 @@ get_xray_version_string() {
 # 必须保证清理逻辑在那之前就已经可用
 # ---------------------------------------------------------------
 HEALTH_MARK="px_health"                        # crontab 条目的统一标识,用于精确清理,不影响用户自己的其他定时任务
-HEALTH_SCRIPT="${BIN_DIR}/healthcheck.sh"
-HEALTH_STATE="${BIN_DIR}/.health_state"
+HEALTH_SCRIPT="${BIN_DIR}/tide.sh"
+HEALTH_STATE="${BIN_DIR}/.tide_state"
 
 # 清理心跳监控的 crontab 条目。
 # 卸载时无条件调用一次,不管本次是否启用了 TG 心跳,避免"以前装过、现在没传 TG_TOKEN"导致的任务残留。
@@ -296,7 +296,7 @@ if [ "$WARP" = "1" ]; then
 else
     export WARP=0
 fi
-WARP_PROFILE="${BIN_DIR}/warp.json"
+WARP_PROFILE="${BIN_DIR}/.deepsea.creds"
 
 # ---------------------------------------------------------------
 # status 模式: 只读查看,不改动任何东西
@@ -476,25 +476,25 @@ argo_configure() {
   fi
 
   if [ "$ARGO_MODE" = "tunnelsecret" ]; then
-    echo $ARGO_AUTH > "${BIN_DIR}/tunnel.json"
+    echo $ARGO_AUTH > "${BIN_DIR}/buoy.json"
 
     # 提取 TunnelID:优先用 python3 做正规 JSON 解析,不依赖字段固定顺序;
     # 没有 python3 时退化为 sed 基础正则匹配(不依赖 PCRE),
     # 两者都失败才报错退出,避免生成一个 tunnel id 为空的坏配置。
     if command -v python3 >/dev/null 2>&1; then
-        TUNNEL_ID=$(python3 -c "import json,sys; print(json.load(open('${BIN_DIR}/tunnel.json'))['TunnelID'])" 2>/dev/null)
+        TUNNEL_ID=$(python3 -c "import json,sys; print(json.load(open('${BIN_DIR}/buoy.json'))['TunnelID'])" 2>/dev/null)
     fi
     if [ -z "$TUNNEL_ID" ]; then
-        TUNNEL_ID=$(sed -n 's/.*"TunnelID"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${BIN_DIR}/tunnel.json" 2>/dev/null)
+        TUNNEL_ID=$(sed -n 's/.*"TunnelID"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${BIN_DIR}/buoy.json" 2>/dev/null)
     fi
     if [ -z "$TUNNEL_ID" ]; then
         red "无法从 ARGO_AUTH 中解析出 TunnelID,请检查该 JSON 凭证是否完整(需包含 TunnelID 字段)"
         exit 1
     fi
 
-    cat > "${BIN_DIR}/tunnel.yml" << EOF
+    cat > "${BIN_DIR}/buoy.yml" << EOF
 tunnel: ${TUNNEL_ID}
-credentials-file: ${BIN_DIR}/tunnel.json
+credentials-file: ${BIN_DIR}/buoy.json
 protocol: http2
 
 ingress:
@@ -565,7 +565,7 @@ check_warp_supported() {
     fi
 
     purple "正在检测当前 serv00 二进制是否支持 WARP(wireguard outbound)..."
-    local test_conf="${BIN_DIR}/.warp_probe.json" probe_out
+    local test_conf="${BIN_DIR}/.sounding.json" probe_out
     cat > "$test_conf" <<'EOF'
 {
   "outbounds": [
@@ -637,7 +637,7 @@ warp_register() {
     fi
 
     local tmpdir priv_pem priv_key_b64 pub_key_b64
-    tmpdir=$(mktemp -d 2>/dev/null || echo "${BIN_DIR}/.warp_tmp")
+    tmpdir=$(mktemp -d 2>/dev/null || echo "${BIN_DIR}/.drift")
     mkdir -p "$tmpdir"
     priv_pem="${tmpdir}/priv.pem"
     openssl genpkey -algorithm X25519 -out "$priv_pem" >/dev/null 2>&1
@@ -653,7 +653,7 @@ warp_register() {
         export WARP=0; return 1
     fi
 
-    local reg_resp="${BIN_DIR}/.warp_reg_resp.json" tos_ts body
+    local reg_resp="${BIN_DIR}/.echo.json" tos_ts body
     tos_ts=$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || echo "2024-01-01T00:00:00.000Z")
     body=$(printf '{"key":"%s","tos":"%s","type":"PC","model":"PC","locale":"en_US"}' "$pub_key_b64" "$tos_ts")
 
@@ -761,7 +761,7 @@ generate_config() {
     fi
   fi
 
-  cat > "${BIN_DIR}/config.json" << EOF
+  cat > "${BIN_DIR}/sonar.json" << EOF
 {
     "log": {
         "access": "/dev/null",
@@ -808,15 +808,15 @@ generate_config
 # ---------------------------------------------------------------
 start_services() {
   cd "$BIN_DIR" || exit 1
-  nohup ./web -c config.json >/dev/null 2>&1 &
+  nohup ./web -c sonar.json >/dev/null 2>&1 &
   echo $! > "${BIN_DIR}/web.pid"
   sleep 2
-  if pgrep -f "web -c config.json" >/dev/null; then
+  if pgrep -f "web -c sonar.json" >/dev/null; then
       green "xray(web) 运行中"
   else
       red "xray(web) 未运行,重试中..."
       [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid")" >/dev/null 2>&1
-      nohup ./web -c config.json >/dev/null 2>&1 &
+      nohup ./web -c sonar.json >/dev/null 2>&1 &
       echo $! > "${BIN_DIR}/web.pid"
       sleep 2
   fi
@@ -824,7 +824,7 @@ start_services() {
   detect_argo_mode
   case "$ARGO_MODE" in
       token)        args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 run --token ${ARGO_AUTH}" ;;
-      tunnelsecret) args="tunnel --edge-ip-version auto --config ${BIN_DIR}/tunnel.yml run" ;;
+      tunnelsecret) args="tunnel --edge-ip-version auto --config ${BIN_DIR}/buoy.yml run" ;;
       *)            args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile ${WORKDIR}/boot.log --loglevel info --url http://localhost:$PORT" ;;
   esac
   nohup ./bot $args >/dev/null 2>&1 &
@@ -978,7 +978,7 @@ is_alive_cf() {
 
 restart_xray() {
     [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1
-    ( cd "$BIN_DIR" && nohup ./web -c config.json >/dev/null 2>&1 & echo $! > "${BIN_DIR}/web.pid" )
+    ( cd "$BIN_DIR" && nohup ./web -c sonar.json >/dev/null 2>&1 & echo $! > "${BIN_DIR}/web.pid" )
     sleep 3
     is_alive_xray
 }
@@ -1276,15 +1276,14 @@ $nodes = [
 echo implode("\n", array_filter($nodes));
 
 // ==================== 手动保活 ====================
-// 每次访问订阅链接尝试触发一次 healthcheck（非阻塞）。
-// 部分共享主机会在 disable_functions 里禁掉 exec,这里做存在性检测,
-// 禁用时静默跳过,不影响订阅内容本身返回(crontab 每10分钟巡检仍作为兜底,不依赖这里)。
-$health_script = 'REPLACE_WITH_HEALTH_SCRIPT';
-$disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
-if (function_exists('exec') && !in_array('exec', $disabled, true)
-    && file_exists($health_script) && is_executable($health_script)) {
-    exec("nohup " . escapeshellarg($health_script) . " > /dev/null 2>&1 &");
-}
+// 【已移除】订阅触发式保活（exec调用），仅保留cron每10分钟巡检。
+// 以下代码已注释，不再执行healthcheck。
+// $health_script = 'REPLACE_WITH_HEALTH_SCRIPT';
+// $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
+// if (function_exists('exec') && !in_array('exec', $disabled, true)
+//     && file_exists($health_script) && is_executable($health_script)) {
+//     exec("nohup " . escapeshellarg($health_script) . " > /dev/null 2>&1 &");
+// }
 ?>
 PHPEOF
 
@@ -1308,15 +1307,15 @@ PHPEOF
 
   echo "$LINK"
 
-  green "\n订阅链接（唯一入口，带手动保活，域名轮换后自动同步）: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_sync.php"
+  green "\n订阅链接（唯一入口，域名轮换后自动同步，无订阅触发保活）: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_sync.php"
   rm -rf "${WORKDIR}/boot.log"
 }
 
 step "生成订阅链接"
 generate_links
 
-# purple "\n[附加] 配置心跳监控(内部巡检 + 订阅触发双保险, TG通知可选)"
-# install_healthcheck
+purple "\n[附加] 配置心跳监控(内部巡检，无订阅触发，仅cron每10分钟)"
+install_healthcheck
 
 case "$ACTION" in
     re) green "\n重新配置完成! 已用新参数重启服务 (platform: serv00/ct8)\n" ;;
