@@ -329,8 +329,8 @@ do_status() {
             red "${name}: 未运行"
         fi
     done
-    if [ -f "${FILE_PATH}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_sync.log" ]; then
-        echo "订阅链接文件: https://${USERNAME}.${CURRENT_DOMAIN}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_sync.log"
+    if [ -f "${FILE_PATH}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_sync.php" ]; then
+        echo "订阅链接文件: https://${USERNAME}.${CURRENT_DOMAIN}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_sync.php"
     fi
     echo "==============================================================="
 }
@@ -687,13 +687,24 @@ PYEOF
 # ---------------------------------------------------------------
 # WARP 出站: 真实联通性测试(用真实注册的密钥,而不是随便编的测试密钥)
 #   这一步是"节点不通"最常见的隐藏根因: check_warp_supported 只验证 JSON 格式合法,
-#   完全不代表 serv00 这台机器出站访问 CF WARP 的 UDP 端点(2408)真的能打通——如果打不通,
+#   完全不代表 serv00 这台机器出站访问 CF WARP 的 UDP 端点真的能打通——如果打不通,
 #   之前 generate_config() 里的路由规则会把 100% 的流量都硬指给这个"看起来配置正确、
 #   实际收不到任何回包"的 warp-out,表现出来就是:进程都在跑、Argo隧道也连上了,但节点
 #   完全不通,而且没有任何报错日志可看(wireguard握手失败在xray里通常也只是安静地丢包)。
+#
 #   做法: 起一个只有 http inbound + warp outbound 的临时 xray 进程,通过它去请求
 #   Cloudflare 官方的 trace 接口,如果拿到的响应里 warp=on,才能真正证明这条路能通;
-#   拿不到就直接关闭 WARP、回退到直连,保证其余功能不被这一个可选特性拖累。
+#   全部尝试都拿不到就直接关闭 WARP、回退到直连,保证其余功能不被这一个可选特性拖累。
+#
+#   两个曾导致"必然失败"的问题在这版里一并修掉:
+#   1) 之前固定 sleep 2 秒就去探测,共享主机负载重/启动慢时 xray 还没就绪,
+#      本地代理端口直接连接失败会被误判成"WARP 不通",其实跟 WARP 本身无关。
+#      改成轮询等待本地端口真正监听(最多等 5 秒),再去发起探测请求。
+#   2) 之前只试 WireGuard UDP 2408 一个端口。serv00 这类 FreeBSD jail 环境,
+#      出站 UDP 经常不是"全封",而是只放行部分端口;Cloudflare WARP 官方在多个
+#      UDP 端口上都能握手成功。这里依次尝试一组候选端口(复用同一个注册好的
+#      endpoint 主机,只换端口),任意一个通了就采用那一个,不再"一个端口不通
+#      就判死刑"。
 # ---------------------------------------------------------------
 warp_live_test() {
     [ "$WARP" = "1" ] || return 0
@@ -710,13 +721,26 @@ warp_live_test() {
         export WARP=0; return 1
     fi
 
-    purple "正在用真实密钥对 WARP 做联通性实测(通过它请求 Cloudflare trace 接口,约需5-8秒)..."
-    local probe_port test_conf test_log test_pid trace_out
-    probe_port=$((RANDOM % 20000 + 20000))
+    # 从注册结果拿到的 endpoint 主机部分(去掉端口),后面轮换端口时复用同一个主机;
+    # 主机名解析失败或格式异常就退回官方域名,避免空主机导致后续全部尝试必然失败。
+    local endpoint_host="${WARP_ENDPOINT%%:*}"
+    [ -z "$endpoint_host" ] && endpoint_host="engage.cloudflareclient.com"
+
+    # Cloudflare WARP 客户端官方支持握手的 UDP 端口不止 2408 一个,
+    # 共享主机的出站 UDP 限制往往只挡了其中一部分,这里依次尝试,
+    # 排在前面的是最常见、最优先应该通的。
+    local candidate_ports=(2408 500 1701 4500 8854 8886)
+
+    purple "正在用真实密钥对 WARP 做联通性实测(会依次尝试 ${#candidate_ports[@]} 个候选端口,每个约需3-5秒)..."
+
+    local port try_port test_conf test_log test_pid trace_out probe_port ok=1 last_reason=""
     test_conf="${BIN_DIR}/.warp_live_test.json"
     test_log="${BIN_DIR}/.warp_live_test.log"
 
-    cat > "$test_conf" <<EOF
+    for try_port in "${candidate_ports[@]}"; do
+        probe_port=$((RANDOM % 20000 + 20000))
+
+        cat > "$test_conf" <<EOF
 {
   "log": { "loglevel": "warning" },
   "inbounds": [
@@ -730,7 +754,7 @@ warp_live_test() {
         "secretKey": "${WARP_PRIVATE_KEY}",
         "address": ["${WARP_ADDRESS_V4:-172.16.0.2/32}", "${WARP_ADDRESS_V6:-::/128}"],
         "peers": [
-          { "publicKey": "${WARP_PEER_PUBLIC_KEY}", "endpoint": "${WARP_ENDPOINT:-engage.cloudflareclient.com:2408}" }
+          { "publicKey": "${WARP_PEER_PUBLIC_KEY}", "endpoint": "${endpoint_host}:${try_port}" }
         ],
         "reserved": [${WARP_RESERVED:-0,0,0}],
         "mtu": 1280
@@ -740,28 +764,61 @@ warp_live_test() {
 }
 EOF
 
-    ( cd "$BIN_DIR" && ./web run -c "$test_conf" > "$test_log" 2>&1 & echo $! > "${BIN_DIR}/.warp_live_test.pid" )
-    sleep 2
+        ( cd "$BIN_DIR" && ./web run -c "$test_conf" > "$test_log" 2>&1 & echo $! > "${BIN_DIR}/.warp_live_test.pid" )
 
-    if [ "$HAVE_CURL" = 1 ]; then
-        trace_out=$(curl -s -m 8 -x "http://127.0.0.1:${probe_port}" "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null)
-    else
-        trace_out=$(http_proxy="http://127.0.0.1:${probe_port}" https_proxy="http://127.0.0.1:${probe_port}" wget -qO- -T 8 "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null)
-    fi
+        # 轮询等待本地探测端口真正监听,而不是固定 sleep,避免"xray还没就绪"被误判成"WARP不通"
+        local waited=0
+        while [ "$waited" -lt 5 ]; do
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/${probe_port}" >/dev/null 2>&1 && break
+            else
+                (exec 3<>"/dev/tcp/127.0.0.1/${probe_port}") >/dev/null 2>&1 && { exec 3>&- 3<&-; break; }
+            fi
+            sleep 0.5
+            waited=$((waited + 1))
+        done
 
-    test_pid=$(cat "${BIN_DIR}/.warp_live_test.pid" 2>/dev/null)
-    [ -n "$test_pid" ] && kill -9 "$test_pid" >/dev/null 2>&1
+        if [ "$HAVE_CURL" = 1 ]; then
+            trace_out=$(curl -s -m 8 -x "http://127.0.0.1:${probe_port}" "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null)
+        else
+            trace_out=$(http_proxy="http://127.0.0.1:${probe_port}" https_proxy="http://127.0.0.1:${probe_port}" wget -qO- -T 8 "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null)
+        fi
+
+        test_pid=$(cat "${BIN_DIR}/.warp_live_test.pid" 2>/dev/null)
+        [ -n "$test_pid" ] && kill -9 "$test_pid" >/dev/null 2>&1
+
+        if echo "$trace_out" | grep -q "warp=on"; then
+            green "WARP 联通性测试通过(端口 ${try_port} 握手成功,已确认流量实际经由 WARP 出口,warp=on)"
+            WARP_ENDPOINT="${endpoint_host}:${try_port}"
+            # 把实测能通的端口写回凭据文件,以后 re/update 直接用这个端口,不用每次都重新试全部候选端口。
+            # -i.bak 这种"带附加后缀"的写法 GNU sed / BSD sed(serv00)都认,不用像别处那样再绕道临时文件。
+            sed -i.bak "s|^WARP_ENDPOINT=.*|WARP_ENDPOINT=$(printf '%q' "$WARP_ENDPOINT")|" "$WARP_PROFILE" 2>/dev/null
+            rm -f "${WARP_PROFILE}.bak"
+            ok=0
+            break
+        fi
+
+        # 记录一下最后一次失败时本地端口是否起来了,便于最终给出更准确的判断
+        if [ "$waited" -ge 5 ]; then
+            last_reason="本地探测端口未能监听(xray 进程可能没跑起来,与 WARP 本身无关)"
+        else
+            last_reason="端口 ${try_port} 未拿到 warp=on 响应(WireGuard 握手大概率被出站防火墙拦截)"
+        fi
+    done
+
     rm -f "$test_conf" "$test_log" "${BIN_DIR}/.warp_live_test.pid"
 
-    if echo "$trace_out" | grep -q "warp=on"; then
-        green "WARP 联通性测试通过(已确认流量实际经由 WARP 出口,warp=on)"
+    if [ "$ok" -eq 0 ]; then
         return 0
-    else
-        red "WARP 联通性测试失败: 通过 WARP 出站访问 Cloudflare 未拿到预期响应,大概率是 serv00 到 CF WARP 端点(UDP 2408)的出站不通。"
-        red "已自动关闭 WARP 并回退为直连出站,确保节点其余功能可用;WARP 凭据已保留,以后该限制解除后可直接复用,无需重新注册。"
-        export WARP=0
-        return 1
     fi
+
+    red "WARP 联通性测试失败: 已依次尝试 ${candidate_ports[*]} 共 ${#candidate_ports[@]} 个 UDP 端口,全部未能确认 warp=on。"
+    red "最后一次失败原因: ${last_reason}"
+    red "如果每个端口都是同样的失败表现,大概率是 serv00 这台机器的出站 UDP 被平台整体限制(FreeBSD jail 环境常见),不是配置问题;"
+    red "可以登录 SSH 手动执行: nc -u -vz -w3 ${endpoint_host} 2408 (或其它候选端口)做进一步确认。"
+    red "已自动关闭 WARP 并回退为直连出站,确保节点其余功能可用;WARP 凭据已保留,以后该限制解除后可直接复用,无需重新注册。"
+    export WARP=0
+    return 1
 }
 
 if [ "$WARP" = "1" ]; then
@@ -1116,9 +1173,10 @@ if [ -n "$prev_domain" ] && [ -n "$cur_domain" ] && [ "$prev_domain" != "$cur_do
     # 拼接公式必须和主脚本 generate_links() 里的保持完全一致,否则两边生成的链接会不一样
     new_link="vless://${SAVED_UUID}@${SAVED_CFIP}:${SAVED_CFPORT}?encryption=none&security=tls&sni=${cur_domain}&type=ws&host=${cur_domain}&path=%2Fdata-sync%3Fed%3D2560#vless-argo-serv00-$(hostname)"
     msg="${msg}🔄 Argo隧道域名已变化: ${prev_domain} → ${cur_domain}"$'\n'"新节点链接:"$'\n'"${new_link}"$'\n'
-    # 同步刷新本地订阅文件内容,避免文件里存的还是老域名的链接(Token.php 每次请求都会实时读取这个文件)
-    if [ -n "$SAVED_FILE_PATH" ] && [ -n "$SAVED_SUB_TOKEN" ] && [ -d "$SAVED_FILE_PATH" ]; then
-        echo "$new_link" > "${SAVED_FILE_PATH}/${SAVED_SUB_TOKEN}_sync.log" 2>/dev/null
+    # 同步刷新私有链接文件(Token.php 每次请求都会实时读取这个文件,不再维护公开的 .log 副本)
+    if [ -n "$SAVED_WORKDIR" ] && [ -d "$SAVED_WORKDIR" ]; then
+        echo "$new_link" > "${SAVED_WORKDIR}/current_link.txt" 2>/dev/null
+        chmod 600 "${SAVED_WORKDIR}/current_link.txt" 2>/dev/null
     fi
 fi
 
@@ -1274,9 +1332,14 @@ HTMLEOF
 
 # ---------------------------------------------------------------
 # 生成订阅链接(vless://)
-#   注: 此前的"订阅请求触发式保活(PHP + exec 唤醒 healthcheck.sh)"已按要求移除,
-#   保活只保留内部 crontab 每10分钟巡检这一种机制,订阅本身回归为纯静态文件下发。
+#   保活双保险: 1) 内部 crontab 每10分钟巡检(兜底,不依赖订阅是否被访问)
+#              2) 订阅 .php 每次被客户端请求时,用 exec+nohup 非阻塞唤醒同一份 healthcheck.sh
+#   只保留 .php 一个订阅入口,不再额外维护公开的 .log 静态文件:
+#   节点链接实际存放在 WORKDIR 下的私有文件 current_link.txt(不在 public_html 内,不会被外部直接访问),
+#   .php 每次请求都会实时读取它,quick tunnel 域名轮换后 healthcheck.sh 更新这一份文件即可,
+#   订阅内容和保活来源统一,不会出现两边不同步的情况。
 # ---------------------------------------------------------------
+
 generate_links() {
   argodomain=$(get_argodomain)
   echo -e "\e[1;32mArgoDomain: \e[1;35m${argodomain}\e[0m\n"
@@ -1285,15 +1348,75 @@ generate_links() {
   LINK="vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&type=ws&host=${argodomain}&path=%2Fdata-sync%3Fed%3D2560#${NAME}"
 
   devil www add "${USERNAME}.${CURRENT_DOMAIN}" php > /dev/null 2>&1
-  echo "$LINK" > "${FILE_PATH}/${SUB_TOKEN}_sync.log"
+
+  # 当前有效链接的唯一数据源:放在 WORKDIR(domains/.../logs,与 public_html 同级但不在其中,
+  # 不会被 HTTP 直接访问到),而不是放进 public_html。
+  # quick tunnel 域名轮换时,healthcheck.sh 只需要更新这一份文件,.php 每次请求都会实时读取它,
+  # 两边天然保持一致,不会再出现"订阅文件是装机时的旧域名快照"的问题。
+  LINK_FILE="${WORKDIR}/current_link.txt"
+  echo "$LINK" > "$LINK_FILE"
+  chmod 600 "$LINK_FILE" >/dev/null 2>&1
+
+  # 创建标准订阅 PHP 文件（一行一个节点，支持未来扩展）
+  cat > "${FILE_PATH}/${SUB_TOKEN}_sync.php" << 'PHPEOF'
+<?php
+// 标准订阅 + 刷新即手动保活 by Go_Real_Serv00.sh
+// 节点链接从私有文件(不在 public_html 下)动态读取,quick tunnel 域名轮换后
+// healthcheck.sh 更新该文件即可让本订阅自动跟着变,无需重装、无需手动改文件。
+
+header('Content-Type: text/plain; charset=utf-8');
+header('Subscription-Userinfo: upload=0; download=0; total=107374182400; expire=0'); // 伪装流量统计
+
+// ==================== 节点链接 ====================
+$link_file = 'REPLACE_WITH_LINK_FILE';
+$fallback_link = 'REPLACE_WITH_LINK'; // 装机时的初始链接,读文件失败时兜底,保证订阅不会直接空白
+
+$link = @file_get_contents($link_file);
+$link = ($link !== false) ? trim($link) : '';
+if ($link === '') {
+    $link = $fallback_link;
+}
+
+$nodes = [
+    $link,  // 主节点
+    // 在此添加更多节点，例如：
+    // 'vless://uuid2@domain:443?...#节点2',
+];
+
+// 输出标准订阅格式（一行一个节点）
+echo implode("\n", array_filter($nodes));
+
+// ==================== 手动保活 ====================
+// 每次访问订阅链接尝试触发一次 healthcheck（非阻塞）。
+// 部分共享主机会在 disable_functions 里禁掉 exec,这里做存在性检测,
+// 禁用时静默跳过,不影响订阅内容本身返回(crontab 每10分钟巡检仍作为兜底,不依赖这里)。
+$health_script = 'REPLACE_WITH_HEALTH_SCRIPT';
+$disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
+if (function_exists('exec') && !in_array('exec', $disabled, true)
+    && file_exists($health_script) && is_executable($health_script)) {
+    exec("nohup " . escapeshellarg($health_script) . " > /dev/null 2>&1 &");
+}
+?>
+PHPEOF
+
+  # 替换占位符（兼容 FreeBSD sed）
+  local php_tmp="${FILE_PATH}/${SUB_TOKEN}_sync.php.tmp.$$"
+  sed \
+    -e "s|REPLACE_WITH_LINK_FILE|${LINK_FILE}|g" \
+    -e "s|REPLACE_WITH_LINK|${LINK}|g" \
+    -e "s|REPLACE_WITH_HEALTH_SCRIPT|${HEALTH_SCRIPT}|g" \
+    "${FILE_PATH}/${SUB_TOKEN}_sync.php" > "$php_tmp" && mv "$php_tmp" "${FILE_PATH}/${SUB_TOKEN}_sync.php"
+
+  chmod 644 "${FILE_PATH}/${SUB_TOKEN}_sync.php" >/dev/null 2>&1
+
   install_homepage
+
   echo "$LINK"
 
-  green "\n订阅链接(静态文件): https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_sync.log"
-  # 注意: 这里只删 boot.log(避免重启cloudflared后读到旧的隧道域名)。
-  # config.json/tunnel.json/tunnel.yml 不能删——心跳监控掉线自动重启时(./web -c config.json / ./bot --config tunnel.yml)还需要用到它们。
+  green "\n订阅链接（唯一入口，带手动保活，域名轮换后自动同步）: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_sync.php"
   rm -rf "${WORKDIR}/boot.log"
 }
+
 step "生成订阅链接"
 generate_links
 
@@ -1306,5 +1429,5 @@ case "$ACTION" in
     *) green "\nRunning done! (platform: serv00/ct8)\n" ;;
 esac
 
-green "订阅地址: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_sync.log"
+green "订阅地址: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_sync.php"
 green "站点首页(伪装页,不含节点信息): https://${USERNAME}.${CURRENT_DOMAIN}/"
