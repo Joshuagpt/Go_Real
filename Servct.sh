@@ -140,7 +140,14 @@ else
 fi
 WORKDIR="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/logs"
 FILE_PATH="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/public_html"
-BIN_DIR="${HOME}/.vless_argo_bin"
+
+# ---- 修改点 1: 目录名改为更中性的 ~/.local/runtime ----
+BIN_DIR="${HOME}/.local/runtime"
+# ---- 修改点 2: 配置文件改名为 runtime.json ----
+CONFIG_FILE="${BIN_DIR}/runtime.json"
+# ---- 修改点 3: warp 配置文件改名为 profile.json ----
+WARP_PROFILE="${BIN_DIR}/profile.json"
+
 STATE_FILE="${BIN_DIR}/.vless_argo.env"
 
 # ---------------------------------------------------------------
@@ -296,7 +303,7 @@ if [ "$WARP" = "1" ]; then
 else
     export WARP=0
 fi
-WARP_PROFILE="${BIN_DIR}/warp.json"
+# WARP_PROFILE 已在上方定义
 
 # ---------------------------------------------------------------
 # status 模式: 只读查看,不改动任何东西
@@ -905,7 +912,8 @@ generate_config() {
     fi
   fi
 
-  cat > "${BIN_DIR}/config.json" << EOF
+  # ---- 修改点: 输出到 $CONFIG_FILE 而非硬编码 config.json ----
+  cat > "$CONFIG_FILE" << EOF
 {
     "log": {
         "access": "/dev/null",
@@ -952,15 +960,16 @@ generate_config
 # ---------------------------------------------------------------
 start_services() {
   cd "$BIN_DIR" || exit 1
-  nohup ./web -c config.json >/dev/null 2>&1 &
+  # ---- 修改点: 使用 $CONFIG_FILE 和 pgrep 匹配 ----
+  nohup ./web -c "$CONFIG_FILE" >/dev/null 2>&1 &
   echo $! > "${BIN_DIR}/web.pid"
   sleep 2
-  if pgrep -f "web -c config.json" >/dev/null; then
+  if pgrep -f "web -c ${CONFIG_FILE}" >/dev/null; then
       green "xray(web) 运行中"
   else
       red "xray(web) 未运行,重试中..."
       [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid")" >/dev/null 2>&1
-      nohup ./web -c config.json >/dev/null 2>&1 &
+      nohup ./web -c "$CONFIG_FILE" >/dev/null 2>&1 &
       echo $! > "${BIN_DIR}/web.pid"
       sleep 2
   fi
@@ -1025,8 +1034,7 @@ install_healthcheck() {
         purple "检测到 TG_TOKEN/TG_ID,已启用心跳异常的 TG 通知"
     fi
 
-    # 用占位符写文件,再用 sed 替换成真实路径,避免直接在 heredoc 里插值时
-    # BIN_DIR 等变量万一包含特殊字符导致生成的子脚本语法出错
+    # ---- 修改点: 在 heredoc 中使用 __CONFIG_FILE__ 占位符 ----
     cat > "$HEALTH_SCRIPT" << 'HEALTHEOF'
 #!/bin/bash
 # 由 vless-argo 主脚本自动生成,请勿手动编辑;重新执行主脚本会覆盖,de 卸载时会自动删除
@@ -1036,6 +1044,7 @@ export LC_ALL=C
 STATE_FILE="__STATE_FILE__"
 BIN_DIR="__BIN_DIR__"
 HEALTH_STATE_FILE="__HEALTH_STATE__"
+CONFIG_FILE="__CONFIG_FILE__"
 
 # 避免 crontab 巡检和 PHP 触发式唤醒同时并发执行造成重复重启/重复通知:
 # 用 mkdir 实现一把简单的原子锁(比 flock 更兼容 FreeBSD 共享主机环境,不依赖额外命令),
@@ -1122,7 +1131,7 @@ is_alive_cf() {
 
 restart_xray() {
     [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1
-    ( cd "$BIN_DIR" && nohup ./web -c config.json >/dev/null 2>&1 & echo $! > "${BIN_DIR}/web.pid" )
+    ( cd "$BIN_DIR" && nohup ./web -c "$CONFIG_FILE" >/dev/null 2>&1 & echo $! > "${BIN_DIR}/web.pid" )
     sleep 3
     is_alive_xray
 }
@@ -1220,19 +1229,18 @@ prev_domain=${cur_domain}
 EOF2
 HEALTHEOF
 
-    # BSD sed 的 -i 语法要求紧跟一个"备份后缀"参数(哪怕是空字符串),和 GNU sed 的
-    # "-i 不带参数即原地修改"不兼容;直接写 `sed -i -e ...` 在 FreeBSD (serv00) 上会把
-    # 第一个 -e 错当成备份后缀吃掉,后面所有 -e/文件名全部错位,报 "sed: -e: No such file
-    # or directory"。用"输出到临时文件再 mv 回去"的写法,两边都能正常工作。
+    # ---- 修改点: 增加 __CONFIG_FILE__ 替换 ----
     local health_tmp="${HEALTH_SCRIPT}.tmp.$$"
-    local state_file_esc bin_dir_esc health_state_esc
+    local state_file_esc bin_dir_esc health_state_esc config_file_esc
     state_file_esc=$(sed_repl_escape "$STATE_FILE")
     bin_dir_esc=$(sed_repl_escape "$BIN_DIR")
     health_state_esc=$(sed_repl_escape "$HEALTH_STATE")
+    config_file_esc=$(sed_repl_escape "$CONFIG_FILE")
     sed \
         -e "s#__STATE_FILE__#${state_file_esc}#g" \
         -e "s#__BIN_DIR__#${bin_dir_esc}#g" \
         -e "s#__HEALTH_STATE__#${health_state_esc}#g" \
+        -e "s#__CONFIG_FILE__#${config_file_esc}#g" \
         "$HEALTH_SCRIPT" > "$health_tmp" && mv "$health_tmp" "$HEALTH_SCRIPT"
     chmod +x "$HEALTH_SCRIPT"
 
