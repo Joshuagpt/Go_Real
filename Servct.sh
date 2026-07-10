@@ -752,7 +752,13 @@ warp_live_test() {
     test_log="${BIN_DIR}/.warp_live_test.log"
 
     for try_port in "${candidate_ports[@]}"; do
-        probe_port=$((RANDOM % 20000 + 20000))
+        # 注意: 这里不能像最初那样随机挑一个本地端口来监听探测用的 HTTP inbound。
+        # serv00 的 FreeBSD jail 只放行账号在 devil 里显式登记过的端口(见 check_port()),
+        # 随机端口会被 jail 的包过滤规则直接拒绝 bind(),报 "operation not permitted"——
+        # 这跟 WireGuard/WARP 能不能连通毫无关系,是这个测试自己用错了端口。
+        # $PORT 是 check_port() 早就在 devil 里申请好、明确授权的端口,此时(生产服务还没启动、
+        # 旧进程已经在脚本更早处被杀掉)是空闲的,直接复用它来做探测,保证一定有权限绑定。
+        probe_port="$PORT"
 
         cat > "$test_conf" <<EOF
 {
@@ -793,30 +799,28 @@ EOF
             waited=$((waited + 1))
         done
 
-        # ---- 第一处修改：检查测试进程是否提前退出 ----
-        test_pid=$(cat "${BIN_DIR}/.warp_live_test.pid" 2>/dev/null)
-        if [ -n "$test_pid" ] && ! kill -0 "$test_pid" 2>/dev/null; then
-            if grep -q "operation not permitted" "$test_log"; then
-                yellow "当前 serv00 Jail 禁止测试程序监听本地端口，无法完成 WARP 联通性测试。"
-                rm -f "$test_conf" "$test_log" "${BIN_DIR}/.warp_live_test.pid"
-                # 保留 WARP 配置，仅跳过测试
-                return 0
-            fi
-        fi
-        # ---- 第一处修改结束 ----
-
         if [ "$HAVE_CURL" = 1 ]; then
             trace_out=$(curl -s -m 8 -x "http://127.0.0.1:${probe_port}" "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null)
         else
             trace_out=$(http_proxy="http://127.0.0.1:${probe_port}" https_proxy="http://127.0.0.1:${probe_port}" wget -qO- -T 8 "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null)
         fi
 
-        test_pid=$(cat "${BIN_DIR}/.warp_live_test.pid" 2>/dev/null)
-        # 判断进程这时候到底还活不活着,活着才代表是"跑起来了但没握手成功",
-        # 不活代表启动阶段就已经死了(这两种情况诊断结论完全不同,不能靠端口有没有监听来倒推)
         local proc_alive=0
+        test_pid=$(cat "${BIN_DIR}/.warp_live_test.pid" 2>/dev/null)
         [ -n "$test_pid" ] && kill -0 "$test_pid" >/dev/null 2>&1 && proc_alive=1
         [ -n "$test_pid" ] && kill -9 "$test_pid" >/dev/null 2>&1
+        # probe_port 在几个候选端口之间是复用的(见上面的说明),kill -9 后端口不一定立刻释放,
+        # 这里等它真正空出来再进入下一轮,避免"上一轮进程还没退干净"被误判成"这一轮也失败了"
+        local release_wait=0
+        while [ "$release_wait" -lt 6 ]; do
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/${probe_port}" >/dev/null 2>&1 || break
+            else
+                (exec 3<>"/dev/tcp/127.0.0.1/${probe_port}") >/dev/null 2>&1 || break
+            fi
+            sleep 0.3
+            release_wait=$((release_wait + 1))
+        done
 
         if echo "$trace_out" | grep -q "warp=on"; then
             green "WARP 联通性测试通过(端口 ${try_port} 握手成功,已确认流量实际经由 WARP 出口,warp=on)"
@@ -829,28 +833,21 @@ EOF
             break
         fi
 
-        # ---- 第二处修改：替换失败原因判断并增加 break ----
-        if [ "$waited" -ge 5 ]; then
-            last_reason="本地探测端口未能监听(xray 进程可能没跑起来,与 WARP 本身无关)"
-            break
-        else
-            last_reason="端口 ${try_port} 未拿到 warp=on 响应(WireGuard 握手大概率被出站防火墙拦截)"
-        fi
-        # 记录日志供调试
+        # 记下 xray 自己在这次尝试里到底输出了什么(哪怕是空的),留到最后失败时一并打印出来,
+        # 不再单凭"端口有没有开"去猜原因——猜测不能代替 xray 自己的报错。
         last_log=$(tail -c 2000 "$test_log" 2>/dev/null)
-        # ---- 第二处修改结束 ----
+        if [ "$proc_alive" -eq 0 ] && [ "$waited" -ge 5 ]; then
+            last_reason="进程在探测窗口内已经退出,且本地端口全程未监听(启动阶段就失败了,和 WARP 是否可达无关)"
+        elif [ "$waited" -ge 5 ]; then
+            last_reason="进程还活着,但本地端口一直没监听上(可能是这个版本二进制处理该配置的方式和预期不同)"
+        else
+            last_reason="端口 ${try_port} 本地已监听,但没拿到 warp=on 响应(更像是 WireGuard 握手本身被拦截/超时)"
+        fi
     done
 
     rm -f "$test_conf" "$test_log" "${BIN_DIR}/.warp_live_test.pid"
 
     if [ "$ok" -eq 0 ]; then
-        return 0
-    fi
-
-    # ---- 第三处修改：根据失败原因决定是否关闭 WARP ----
-    if echo "$last_reason" | grep -q "本地探测端口未能监听"; then
-        yellow "由于测试程序未成功启动，无法判断 WARP 是否可用。"
-        yellow "保留 WARP 配置，不自动关闭。"
         return 0
     fi
 
@@ -864,10 +861,9 @@ EOF
     fi
     red "如果每个端口都是同样的失败表现,大概率是 serv00 这台机器的出站 UDP 被平台整体限制(FreeBSD jail 环境常见),不是配置问题;"
     red "可以登录 SSH 手动执行: nc -u -vz -w3 ${endpoint_host} 2408 (或其它候选端口)做进一步确认。"
-    red "已确认 WARP 不可用，自动回退为直连。"
+    red "已自动关闭 WARP 并回退为直连出站,确保节点其余功能可用;WARP 凭据已保留,以后该限制解除后可直接复用,无需重新注册。"
     export WARP=0
     return 1
-    # ---- 第三处修改结束 ----
 }
 
 if [ "$WARP" = "1" ]; then
