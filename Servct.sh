@@ -3,7 +3,7 @@
 # VLESS+WS+Argo 一键部署脚本 —— serv00/ct8 专版
 # 平台: 仅支持 Serv00/CT8 共享主机(devil 管理),不含普通 Linux VPS 相关代码
 # 生命周期: install(默认) / re(改参数重装) / update(强制更新二进制并重启) / de(卸载清理) / status(查看状态)
-# 保活方案: 轻量订阅触发（仅PID检查）+ cron完整巡检（含保护）
+# 保活方案: 内部 cron 每10分钟巡检一次(订阅触发式唤醒等其他保活方式已移除,后续按需再加)
 # ===================================================================
 
 # Alpine/其他环境下若被 sh 调用则自举切换到 bash(serv00 默认自带 bash,这里仅作兜底)
@@ -863,75 +863,67 @@ get_argodomain() {
   fi
 }
 
-# ===============================================================
-# ★★★ 修改点1：替换 install_healthcheck 函数 ★★★
-# ===============================================================
+# ---------------------------------------------------------------
+# 心跳监控: 只要 TG_TOKEN + TG_ID 同时设置就自动启用,无需额外开关
+#   - 生成独立的 healthcheck.sh,探测 xray/cloudflared 是否存活
+#   - 只在状态变化时(正常->异常 / 异常->恢复)推送 TG 消息,不会每次检查都刷屏
+#   - 检测到异常先自动尝试重启,重启成功/失败的结果一并发送
+#   - 调度双保险:
+#       1) crontab 每 10 分钟主动巡检一次(兜底,不依赖订阅是否被访问)
+#       2) 订阅地址 Token.php 每次被客户端请求时,也会用 nohup 非阻塞方式唤醒同一份
+#          (曾用: 订阅请求触发式唤醒 PHP 方案,现已按要求移除,只保留下面这一种巡检机制)
+#   - 卸载(de)时由前面定义的 remove_healthcheck_schedule 统一清理,不留定时任务垃圾
+# ---------------------------------------------------------------
 install_healthcheck() {
     if [ -z "$TG_TOKEN" ] || [ -z "$TG_ID" ]; then
-        yellow "未设置 TG_TOKEN / TG_ID，健康检查仅用于保活，不发送 TG 通知"
+        yellow "未设置 TG_TOKEN / TG_ID,跳过 TG 通知(健康检查脚本仍会安装,供订阅触发式保活使用;如需 TG 通知,带上这两个环境变量重新执行本脚本即可)"
     else
-        purple "检测到 TG_TOKEN/TG_ID，已启用心跳异常的 TG 通知"
+        purple "检测到 TG_TOKEN/TG_ID,已启用心跳异常的 TG 通知"
     fi
 
+    # 用占位符写文件,再用 sed 替换成真实路径,避免直接在 heredoc 里插值时
+    # BIN_DIR 等变量万一包含特殊字符导致生成的子脚本语法出错
     cat > "$HEALTH_SCRIPT" << 'HEALTHEOF'
 #!/bin/bash
-# 健康检查脚本（支持 --light 轻量模式）
+# 由 vless-argo 主脚本自动生成,请勿手动编辑;重新执行主脚本会覆盖,de 卸载时会自动删除
+# LC_ALL=C: cron/PHP exec() 启动的是全新环境,不会继承主脚本 export 的 LC_ALL,
+# 这里必须显式重设,否则下面 urlencode() 按字节遍历中文/emoji 时会出现编码错误
 export LC_ALL=C
 STATE_FILE="__STATE_FILE__"
 BIN_DIR="__BIN_DIR__"
 HEALTH_STATE_FILE="__HEALTH_STATE__"
+
+# 避免 crontab 巡检和 PHP 触发式唤醒同时并发执行造成重复重启/重复通知:
+# 用 mkdir 实现一把简单的原子锁(比 flock 更兼容 FreeBSD 共享主机环境,不依赖额外命令),
+# 拿不到锁直接退出(不排队等待),因为这本来就是"过一会儿再探测一次"的周期性任务,
+# 错过一次没关系,下一次巡检/下一次订阅请求会再探测。锁目录若因异常残留超过2分钟,
+# 视为陈旧锁自动清除,避免一次崩溃就永久卡死后续所有探测。
 LOCK_DIR="${BIN_DIR}/.health.lock"
-COOLDOWN_FILE="${BIN_DIR}/.restart_cooldown"
-
-# 参数解析
-LIGHT_MODE=0
-if [ "$1" = "--light" ]; then
-    LIGHT_MODE=1
+if [ -d "$LOCK_DIR" ]; then
+    lock_age=$(( $(date +%s) - $(stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0) ))
+    [ "$lock_age" -gt 120 ] && rm -rf "$LOCK_DIR" 2>/dev/null
 fi
+mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
-# ---------- 公用函数 ----------
-is_recently_started() {
-    local pidfile="$1"
-    [ -f "$pidfile" ] || return 1
-    local pid=$(cat "$pidfile" 2>/dev/null)
-    [ -n "$pid" ] || return 1
-    local start_time=$(ps -o lstart= -p "$pid" 2>/dev/null | xargs -I {} date -d "{}" +%s 2>/dev/null)
-    [ -n "$start_time" ] || return 1
-    local now=$(date +%s)
-    [ $((now - start_time)) -lt 120 ] && return 0
-    return 1
-}
+[ -f "$STATE_FILE" ] || exit 0
+# shellcheck disable=SC1090
+source "$STATE_FILE"
 
-is_in_cooldown() {
-    [ -f "$COOLDOWN_FILE" ] || return 1
-    local last_restart=$(cat "$COOLDOWN_FILE" 2>/dev/null)
-    [ -n "$last_restart" ] || return 1
-    local now=$(date +%s)
-    [ $((now - last_restart)) -lt 180 ] && return 0
-    return 1
-}
+TG_TOKEN="$SAVED_TG_TOKEN"
+TG_ID="$SAVED_TG_ID"
 
-mark_restart() {
-    date +%s > "$COOLDOWN_FILE"
-}
-
-try_lock() {
-    if [ -d "$LOCK_DIR" ]; then
-        lock_age=$(( $(date +%s) - $(stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0) ))
-        [ "$lock_age" -gt 120 ] && rm -rf "$LOCK_DIR" 2>/dev/null
-    fi
-    mkdir "$LOCK_DIR" 2>/dev/null || exit 0
-    trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
-}
-
-# ---------- Telegram 通知 ----------
+# 纯 bash 实现的 urlencode,不依赖 python/perl,逐字节处理(兼容 UTF-8 多字节字符,
+# 因为未保留字符会被原样透传,只有 ASCII 保留字符才需要转义,多字节 UTF-8 序列本身
+# 不含这些保留字符,可以安全地按字节遍历)
 urlencode() {
     local s="$1" out="" c i
     for (( i = 0; i < ${#s}; i++ )); do
         c="${s:i:1}"
         case "$c" in
             [a-zA-Z0-9.~_-]) out+="$c" ;;
-            *) printf -v hex '%02X' "'$c"; out+="%${hex}" ;;
+            *) printf -v hex '%02X' "'$c"
+               out+="%${hex}" ;;
         esac
     done
     printf '%s' "$out"
@@ -962,10 +954,22 @@ tg_send() {
     return $ok
 }
 
-# ---------- 核心检查 ----------
-# 只检查 PID，不探测端口（避免 WARP 路由干扰）
+# 判断本地端口是否真的在监听(/dev/tcp 是 bash 内建能力,不依赖额外装 nc)
+is_port_open() {
+    local port="$1"
+    [ -z "$port" ] && return 1
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 3 bash -c "echo >/dev/tcp/127.0.0.1/${port}" >/dev/null 2>&1
+    else
+        (exec 3<>"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1
+    fi
+}
+
+# xray 是否真正可用:进程存活是前提,但存活不代表能用(配置错、内部异常都可能导致端口没起来),
+# 所以额外加一层本地端口连通性探测,两者都过才算真的"up"
 is_alive_xray() {
-    [ -f "${BIN_DIR}/web.pid" ] && kill -0 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1
+    [ -f "${BIN_DIR}/web.pid" ] && kill -0 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1 || return 1
+    is_port_open "$SAVED_PORT"
 }
 
 is_alive_cf() {
@@ -976,16 +980,20 @@ restart_xray() {
     [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1
     ( cd "$BIN_DIR" && nohup ./web -c sonar.json >/dev/null 2>&1 & echo $! > "${BIN_DIR}/web.pid" )
     sleep 3
-    mark_restart
+    is_alive_xray
 }
 
 restart_cf() {
     [ -f "${BIN_DIR}/bot.pid" ] && kill -9 "$(cat "${BIN_DIR}/bot.pid" 2>/dev/null)" >/dev/null 2>&1
     ( cd "$BIN_DIR" && nohup ./bot ${SAVED_BOT_ARGS} >/dev/null 2>&1 & echo $! > "${BIN_DIR}/bot.pid" )
     sleep 3
-    mark_restart
+    is_alive_cf
 }
 
+# 取当前生效的 Argo 域名。
+# 固定隧道(设置了 ARGO_AUTH,token 或 TunnelSecret 模式)域名是绑定好的,不会变,直接返回。
+# quick tunnel(未设置 ARGO_AUTH)模式下,每次 cloudflared 重启域名都会重新随机分配,需要从 boot.log 里解析;
+# wait_retries>0 时会重试等待(用于刚重启完、隧道还没建立好的情况),平时每轮只读一次不等待,避免每次巡检都白等几秒。
 get_current_domain() {
     local wait_retries="${1:-0}" n=0 d=""
     if [ -n "$SAVED_ARGO_AUTH" ]; then
@@ -1002,94 +1010,42 @@ get_current_domain() {
     echo "$d"
 }
 
-# ---------- 主流程 ----------
-try_lock
-[ -f "$STATE_FILE" ] || exit 0
-# shellcheck disable=SC1090
-source "$STATE_FILE"
-
-# 启动保护：任何模式下，若两个进程均启动不足120秒则直接退出
-if is_recently_started "${BIN_DIR}/web.pid" && is_recently_started "${BIN_DIR}/bot.pid"; then
-    exit 0
-fi
-
-# 轻量模式：只检查 PID，若均存在则退出，否则触发完整模式
-if [ "$LIGHT_MODE" -eq 1 ]; then
-    if is_alive_xray && is_alive_cf; then
-        exit 0
-    else
-        # PID 缺失，调用完整模式修复
-        nohup "$0" >/dev/null 2>&1 &
-        exit 0
-    fi
-fi
-
-# ---------- 完整模式（仅 cron） ----------
-if is_in_cooldown; then
-    exit 0
-fi
-
-# 读取上次状态
+# 读取上一次记录的状态,文件不存在(首次运行)时视为"up"且域名未知,避免刚装好第一次检测就误报
 prev_xray="up"; prev_cf="up"; prev_domain=""
 if [ -f "$HEALTH_STATE_FILE" ]; then
     # shellcheck disable=SC1090
     source "$HEALTH_STATE_FILE"
 fi
 
-# 连续失败确认：先检测一次，若失败则等待10秒再测一次
-check_with_retry() {
-    local check_func=$1
-    local retries=2
-    local count=0
-    while [ $count -lt $retries ]; do
-        if $check_func; then
-            return 0
-        fi
-        count=$((count + 1))
-        if [ $count -lt $retries ]; then
-            sleep 10
-        fi
-    done
-    return 1
-}
-
-cur_xray="down"
-if check_with_retry is_alive_xray; then
-    cur_xray="up"
-fi
-
-cur_cf="down"
-if check_with_retry is_alive_cf; then
-    cur_cf="up"
-fi
-
+cur_xray="down"; is_alive_xray && cur_xray="up"
+cur_cf="down"; is_alive_cf && cur_cf="up"
 cf_restarted=0
 msg=""
 
 if [ "$cur_xray" = "down" ] && [ "$prev_xray" != "down" ]; then
     if restart_xray; then
         cur_xray="up"
-        msg="${msg}⚠️ xray 掉线，已自动重启成功 ✅"$'\n'
+        msg="${msg}⚠️ xray(节点) 掉线,已自动重启成功 ✅"$'\n'
     else
-        msg="${msg}🔴 xray 掉线，自动重启失败 ❌"$'\n'
+        msg="${msg}🔴 xray(节点) 掉线,自动重启失败,请人工检查 ❌"$'\n'
     fi
 elif [ "$cur_xray" = "up" ] && [ "$prev_xray" = "down" ]; then
-    msg="${msg}✅ xray 已恢复正常"$'\n'
+    msg="${msg}✅ xray(节点) 已恢复正常"$'\n'
 fi
 
 if [ "$cur_cf" = "down" ] && [ "$prev_cf" != "down" ]; then
     if restart_cf; then
         cur_cf="up"
         cf_restarted=1
-        msg="${msg}⚠️ cloudflared 掉线，已自动重启成功 ✅"$'\n'
+        msg="${msg}⚠️ cloudflared(隧道) 掉线,已自动重启成功 ✅"$'\n'
     else
-        msg="${msg}🔴 cloudflared 掉线，自动重启失败 ❌"$'\n'
+        msg="${msg}🔴 cloudflared(隧道) 掉线,自动重启失败,请人工检查 ❌"$'\n'
     fi
 elif [ "$cur_cf" = "up" ] && [ "$prev_cf" = "down" ]; then
-    msg="${msg}✅ cloudflared 已恢复正常"$'\n'
+    msg="${msg}✅ cloudflared(隧道) 已恢复正常"$'\n'
 fi
 
-# 域名变化处理
+# 隧道刚重启完,新域名可能还没写进日志,多等几秒;平时(没重启)只读一次,读不到就沿用旧值,不当成"变化"
 if [ "$cf_restarted" -eq 1 ]; then
     cur_domain="$(get_current_domain 6)"
 else
@@ -1098,8 +1054,11 @@ fi
 [ -z "$cur_domain" ] && cur_domain="$prev_domain"
 
 if [ -n "$prev_domain" ] && [ -n "$cur_domain" ] && [ "$prev_domain" != "$cur_domain" ]; then
+    # 域名变了,直接拼出新的 vless:// 链接一起推送,不用让用户自己去猜怎么改;
+    # 拼接公式必须和主脚本 generate_links() 里的保持完全一致,否则两边生成的链接会不一样
     new_link="vless://${SAVED_UUID}@${SAVED_CFIP}:${SAVED_CFPORT}?encryption=none&security=tls&sni=${cur_domain}&type=ws&host=${cur_domain}&path=%2Fdata-sync%3Fed%3D2560#vless-argo-serv00-$(hostname)"
     msg="${msg}🔄 Argo隧道域名已变化: ${prev_domain} → ${cur_domain}"$'\n'"新节点链接:"$'\n'"${new_link}"$'\n'
+    # 同步刷新私有链接文件(Token.php 每次请求都会实时读取这个文件,不再维护公开的 .log 副本)
     if [ -n "$SAVED_WORKDIR" ] && [ -d "$SAVED_WORKDIR" ]; then
         echo "$new_link" > "${SAVED_WORKDIR}/current_link.txt" 2>/dev/null
         chmod 600 "${SAVED_WORKDIR}/current_link.txt" 2>/dev/null
@@ -1117,7 +1076,10 @@ prev_domain=${cur_domain}
 EOF2
 HEALTHEOF
 
-    # 替换占位符
+    # BSD sed 的 -i 语法要求紧跟一个"备份后缀"参数(哪怕是空字符串),和 GNU sed 的
+    # "-i 不带参数即原地修改"不兼容;直接写 `sed -i -e ...` 在 FreeBSD (serv00) 上会把
+    # 第一个 -e 错当成备份后缀吃掉,后面所有 -e/文件名全部错位,报 "sed: -e: No such file
+    # or directory"。用"输出到临时文件再 mv 回去"的写法,两边都能正常工作。
     local health_tmp="${HEALTH_SCRIPT}.tmp.$$"
     local state_file_esc bin_dir_esc health_state_esc
     state_file_esc=$(sed_repl_escape "$STATE_FILE")
@@ -1130,25 +1092,21 @@ HEALTHEOF
         "$HEALTH_SCRIPT" > "$health_tmp" && mv "$health_tmp" "$HEALTH_SCRIPT"
     chmod +x "$HEALTH_SCRIPT"
 
-    # 重置状态
+    # 首次安装/每次重装都重置为"正常",避免用旧状态触发一次多余的通知
     cat > "$HEALTH_STATE" <<EOF
 prev_xray=up
 prev_cf=up
 EOF
 
-    remove_healthcheck_schedule
+    remove_healthcheck_schedule   # 先清一遍旧的,防止 re/update 反复执行时重复叠加
 
-    # 注册 cron（每10分钟执行完整模式）
     if command -v crontab >/dev/null 2>&1; then
         ( crontab -l 2>/dev/null | grep -v "$HEALTH_MARK"; echo "*/10 * * * * ${HEALTH_SCRIPT} >/dev/null 2>&1 # ${HEALTH_MARK}" ) | crontab -
-        green "已通过 crontab 启用完整巡检（每10分钟），含连续确认和冷却保护"
+        green "已通过 crontab 启用内部巡检保活(每10分钟一次)"
     else
-        red "未找到 crontab，请手动添加: */10 * * * * ${HEALTH_SCRIPT}"
+        red "未找到 crontab 命令,心跳脚本已生成但未能自动加入定时任务,请手动配置: */10 * * * * ${HEALTH_SCRIPT}"
     fi
 }
-# ===============================================================
-# ★★★ 修改点1结束 ★★★
-# ===============================================================
 
 # ---------------------------------------------------------------
 # 伪装主页: 在站点根目录放一个正常网站样式的 index.html,
@@ -1264,7 +1222,7 @@ HTMLEOF
 # ---------------------------------------------------------------
 # 生成订阅链接(vless://)
 #   保活双保险: 1) 内部 crontab 每10分钟巡检(兜底,不依赖订阅是否被访问)
-#              2) 订阅 .php 每次被客户端请求时,用 exec+nohup 非阻塞唤醒同一份 healthcheck.sh (轻量模式)
+#              2) 订阅 .php 每次被客户端请求时,用 exec+nohup 非阻塞唤醒同一份 healthcheck.sh
 #   只保留 .php 一个订阅入口,不再额外维护公开的 .log 静态文件:
 #   节点链接实际存放在 WORKDIR 下的私有文件 current_link.txt(不在 public_html 内,不会被外部直接访问),
 #   .php 每次请求都会实时读取它,quick tunnel 域名轮换后 healthcheck.sh 更新这一份文件即可,
@@ -1317,16 +1275,15 @@ $nodes = [
 // 输出标准订阅格式（一行一个节点）
 echo implode("\n", array_filter($nodes));
 
-// ==================== 手动保活（轻量触发） ====================
-// 每次访问订阅链接触发一次轻量健康检查（--light），仅检查 PID，不重启。
-// 部分共享主机会在 disable_functions 里禁掉 exec,这里做存在性检测,
-// 禁用时静默跳过,不影响订阅内容本身返回(crontab 每10分钟巡检仍作为兜底,不依赖这里)。
-$health_script = 'REPLACE_WITH_HEALTH_SCRIPT';
-$disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
-if (function_exists('exec') && !in_array('exec', $disabled, true)
-    && file_exists($health_script) && is_executable($health_script)) {
-    exec("nohup " . escapeshellarg($health_script) . " --light > /dev/null 2>&1 &");
-}
+// ==================== 手动保活 ====================
+// 【已移除】订阅触发式保活（exec调用），仅保留cron每10分钟巡检。
+// 以下代码已注释，不再执行healthcheck。
+// $health_script = 'REPLACE_WITH_HEALTH_SCRIPT';
+// $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
+// if (function_exists('exec') && !in_array('exec', $disabled, true)
+//     && file_exists($health_script) && is_executable($health_script)) {
+//     exec("nohup " . escapeshellarg($health_script) . " > /dev/null 2>&1 &");
+// }
 ?>
 PHPEOF
 
@@ -1350,14 +1307,14 @@ PHPEOF
 
   echo "$LINK"
 
-  green "\n订阅链接（唯一入口，带轻量保活，域名轮换后自动同步）: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_sync.php"
+  green "\n订阅链接（唯一入口，域名轮换后自动同步，无订阅触发保活）: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_sync.php"
   rm -rf "${WORKDIR}/boot.log"
 }
 
 step "生成订阅链接"
 generate_links
 
-purple "\n[附加] 配置心跳监控(内部巡检 + 订阅触发双保险, TG通知可选)"
+purple "\n[附加] 配置心跳监控(内部巡检，无订阅触发，仅cron每10分钟)"
 install_healthcheck
 
 case "$ACTION" in
