@@ -3,7 +3,7 @@
 # VLESS+WS+Argo 一键部署脚本 —— serv00/ct8 专版
 # 平台: 仅支持 Serv00/CT8 共享主机(devil 管理),不含普通 Linux VPS 相关代码
 # 生命周期: install(默认) / re(改参数重装) / update(强制更新二进制并重启) / de(卸载清理) / status(查看状态)
-# 保活方案: 内部 cron 每5分钟巡检一次(订阅触发式唤醒已彻底移除,不再保留)
+# 保活方案: 内部 cron 每5分钟巡检一次
 # ===================================================================
 
 # Alpine/其他环境下若被 sh 调用则自举切换到 bash(serv00 默认自带 bash,这里仅作兜底)
@@ -27,7 +27,7 @@ export LC_ALL=C
 # 子命令解析
 # 用法示例:
 #   bash <(curl -Ls .../Go_Real_Serv00.sh)                                    # 安装
-#   UUID=xxx bash <(curl -Ls .../Go_Real_Serv00.sh) re                        # 改参数重装(未显式指定的项目沿用上次安装的值; 端口由 devil 分配,不支持自定义)
+#   UUID=xxx bash <(curl -Ls .../Go_Real_Serv00.sh) re                        # 改参数重装(沿用未指定的旧配置; 端口由devil分配,不支持自定义)
 #   WARP=1 bash <(curl -Ls .../Go_Real_Serv00.sh) re                          # 开启WARP出站(账号凭据只注册一次、以后自动复用;开关本身每次都要显式带 WARP=1)
 #   bash <(curl -Ls .../Go_Real_Serv00.sh) update                             # 强制重新下载二进制并重启
 #   bash <(curl -Ls .../Go_Real_Serv00.sh) status                             # 查看当前配置和运行状态
@@ -123,7 +123,6 @@ if ! command -v devil >/dev/null 2>&1; then
     red "未检测到 devil 命令,本脚本是 serv00/ct8 专版,无法在当前环境运行"
     exit 1
 fi
-PLATFORM="serv00"
 
 HOSTNAME=$(hostname)
 USERNAME=$(whoami | tr '[:upper:]' '[:lower:]')
@@ -140,7 +139,7 @@ else
 fi
 WORKDIR="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/logs"
 FILE_PATH="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/public_html"
-BIN_DIR="${HOME}/.oceanus"
+BIN_DIR="${HOME}/.runtime"
 STATE_FILE="${BIN_DIR}/.current.log"
 
 # ---------------------------------------------------------------
@@ -155,6 +154,7 @@ load_state() {
 save_state() {
     mkdir -p "$BIN_DIR"
     cat > "$STATE_FILE" <<EOF
+SAVED_USERNAME=$(printf '%q' "$USERNAME")
 SAVED_UUID=$(printf '%q' "$UUID")
 SAVED_PORT=$(printf '%q' "$PORT")
 SAVED_ARGO_DOMAIN=$(printf '%q' "$ARGO_DOMAIN")
@@ -168,7 +168,6 @@ SAVED_BOT_ARGS=$(printf '%q' "$args")
 SAVED_WORKDIR=$(printf '%q' "$WORKDIR")
 SAVED_FILE_PATH=$(printf '%q' "$FILE_PATH")
 SAVED_WARP=$(printf '%q' "$WARP")
-SAVED_WARP_FAILOVER=$(printf '%q' "$WARP_FAILOVER")
 EOF
     # STATE_FILE 里明文保存了 TG_TOKEN 等敏感信息,收紧权限避免同机其他用户读取
     chmod 600 "$STATE_FILE" >/dev/null 2>&1
@@ -182,9 +181,9 @@ get_xray_version_string() {
 # 提前到这里定义(而不是放在脚本靠后位置),是因为 de 卸载分支会提前 exit,
 # 必须保证清理逻辑在那之前就已经可用
 # ---------------------------------------------------------------
-HEALTH_MARK="oceanus_tide"                      # crontab 条目的统一标识,用于精确清理,不影响用户自己的其他定时任务
-HEALTH_SCRIPT="${BIN_DIR}/tide.sh"
-HEALTH_STATE="${BIN_DIR}/.tide_state"
+HEALTH_MARK="sys_mon"                        # crontab 条目的统一标识,用于精确清理,不影响用户自己的其他定时任务
+HEALTH_SCRIPT="${BIN_DIR}/monitor.sh"
+HEALTH_STATE="${BIN_DIR}/.mon_state"
 
 # 清理心跳监控的 crontab 条目。
 # 卸载时无条件调用一次,不管本次是否启用了 TG 心跳,避免"以前装过、现在没传 TG_TOKEN"导致的任务残留。
@@ -297,7 +296,7 @@ if [ "$WARP" = "1" ]; then
 else
     export WARP=0
 fi
-WARP_PROFILE="${BIN_DIR}/.deepsea.creds"
+WARP_PROFILE="${BIN_DIR}/.wg.env"
 
 # ---------------------------------------------------------------
 # status 模式: 只读查看,不改动任何东西
@@ -319,7 +318,7 @@ do_status() {
             yellow "TG心跳监控   : 已配置TG_TOKEN/TG_ID,但未找到心跳脚本(可能尚未 install/re 过),请重新执行一次脚本"
         fi
         if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q "$HEALTH_MARK"; then
-            echo "  定时任务   : crontab 已注册 (每5分钟巡检)"
+            echo "  定时任务   : crontab 已注册 (每5分钟巡检一次)"
         else
             yellow "  定时任务   : 未检测到(可能需要重新执行脚本以注册)"
         fi
@@ -329,11 +328,6 @@ do_status() {
     if [ "$SAVED_WARP" = "1" ]; then
         if [ -f "$WARP_PROFILE" ]; then
             green "WARP出站     : 已启用(凭据: ${WARP_PROFILE})"
-            if [ "$SAVED_WARP_FAILOVER" = "1" ]; then
-                green "  故障自动切回: 已启用(WARP 运行时失效会自动切回 direct,恢复后自动切回去)"
-            else
-                yellow "  故障自动切回: 未启用(当前二进制不支持 Observatory+balancer,WARP 运行时失效不会自动切回 direct)"
-            fi
         else
             yellow "WARP出站     : 已请求启用,但尚未找到凭据文件(可能上次注册失败,重新执行脚本会再次尝试注册)"
         fi
@@ -349,8 +343,8 @@ do_status() {
             red "${name}: 未运行"
         fi
     done
-    if [ -f "${FILE_PATH}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_sync.php" ]; then
-        echo "订阅链接文件: https://${USERNAME}.${CURRENT_DOMAIN}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_sync.php"
+    if [ -f "${FILE_PATH}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_feed.php" ]; then
+        echo "订阅链接文件: https://${USERNAME}.${CURRENT_DOMAIN}/${SAVED_SUB_TOKEN:-$SUB_TOKEN}_feed.php"
     fi
     echo "==============================================================="
 }
@@ -382,11 +376,6 @@ graceful_kill_pidfile "${BIN_DIR}/web.pid"
 graceful_kill_pidfile "${BIN_DIR}/bot.pid"
 safe_rm "$WORKDIR" "$FILE_PATH"
 mkdir -p "$WORKDIR" "$FILE_PATH" "$BIN_DIR"
-# BIN_DIR 收紧到仅本人可读写执行(700): 里面装的是节点 config(含明文 UUID,
-# 开 WARP 时还含 wireguard 私钥)、Argo tunnel 凭据、二进制本体,一旦目录本身
-# 对同机其他用户可遍历,单个文件有没有各自 chmod 600 就没那么重要了——下面
-# 仍然会给最敏感的几个文件单独 chmod,做纵深防御,不完全依赖这一层。
-chmod 700 "$BIN_DIR" >/dev/null 2>&1
 # 755 而不是 777: public_html 需要让 devil 起的 web 服务进程能"读"到订阅文件,
 # 但不应该允许同机其他用户"写"这个目录(777 会导致任意用户可篡改/植入文件)
 chmod 755 "$WORKDIR" "$FILE_PATH" >/dev/null 2>&1
@@ -487,26 +476,25 @@ argo_configure() {
   fi
 
   if [ "$ARGO_MODE" = "tunnelsecret" ]; then
-    echo $ARGO_AUTH > "${BIN_DIR}/buoy.json"
-    chmod 600 "${BIN_DIR}/buoy.json" >/dev/null 2>&1
+    echo $ARGO_AUTH > "${BIN_DIR}/cred.json"
 
     # 提取 TunnelID:优先用 python3 做正规 JSON 解析,不依赖字段固定顺序;
     # 没有 python3 时退化为 sed 基础正则匹配(不依赖 PCRE),
     # 两者都失败才报错退出,避免生成一个 tunnel id 为空的坏配置。
     if command -v python3 >/dev/null 2>&1; then
-        TUNNEL_ID=$(python3 -c "import json,sys; print(json.load(open('${BIN_DIR}/buoy.json'))['TunnelID'])" 2>/dev/null)
+        TUNNEL_ID=$(python3 -c "import json,sys; print(json.load(open('${BIN_DIR}/cred.json'))['TunnelID'])" 2>/dev/null)
     fi
     if [ -z "$TUNNEL_ID" ]; then
-        TUNNEL_ID=$(sed -n 's/.*"TunnelID"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${BIN_DIR}/buoy.json" 2>/dev/null)
+        TUNNEL_ID=$(sed -n 's/.*"TunnelID"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${BIN_DIR}/cred.json" 2>/dev/null)
     fi
     if [ -z "$TUNNEL_ID" ]; then
         red "无法从 ARGO_AUTH 中解析出 TunnelID,请检查该 JSON 凭证是否完整(需包含 TunnelID 字段)"
         exit 1
     fi
 
-    cat > "${BIN_DIR}/buoy.yml" << EOF
+    cat > "${BIN_DIR}/tunnel.yml" << EOF
 tunnel: ${TUNNEL_ID}
-credentials-file: ${BIN_DIR}/buoy.json
+credentials-file: ${BIN_DIR}/cred.json
 protocol: http2
 
 ingress:
@@ -516,9 +504,8 @@ ingress:
       noTLSVerify: true
   - service: http_status:404
 EOF
-    chmod 600 "${BIN_DIR}/buoy.yml" >/dev/null 2>&1
   else
-    yellow "当前使用的是token,请在cloudflare后台设置隧道端口为 \e[1;35m${PORT}${re}"
+    yellow "当前使用的是token,请在cloudflare后台设置隧道端口为${purple}${PORT}${re}"
   fi
 }
 step "配置 Argo 隧道"
@@ -547,14 +534,14 @@ download_binaries() {
   else
       purple "正在下载 web(xray)..."
       fetch_with_retry "${BASE_URL}/${WEB_ASSET}" "${BIN_DIR}/web" || exit 1
-      chmod 700 "${BIN_DIR}/web"
+      chmod +x "${BIN_DIR}/web"
   fi
   if [ -x "${BIN_DIR}/bot" ] && [ "$FORCE_REDOWNLOAD" != "1" ]; then
       green "bot 已存在,跳过下载"
   else
       purple "正在下载 bot(cloudflared)..."
       fetch_with_retry "${BASE_URL}/${BOT_ASSET}" "${BIN_DIR}/bot" || exit 1
-      chmod 700 "${BIN_DIR}/bot"
+      chmod +x "${BIN_DIR}/bot"
   fi
 }
 step "下载并校验核心程序(网络耗时最长的一步,请耐心等待)"
@@ -562,8 +549,8 @@ download_binaries
 
 # ---------------------------------------------------------------
 # WARP 出站: 平台能力检测
-#   serv00 二进制是第三方重命名的 freebsd 构建,协议支持情况未知,
-#   不能假设它和官方行为一致,必须用 -test 校验模式实测一份最小 wireguard 配置。
+#   本脚本使用的是第三方重命名的 freebsd 二进制,协议支持情况未知,
+#   不能假设它和官方 Xray-core 行为一致,必须用 -test 校验模式实测一份最小 wireguard 配置。
 #   探测本身失败(比如二进制根本不认 -test 这个参数)时,出于稳妥也当作不支持处理,
 #   而不是冒险继续——这是可选增强功能,宁可关掉也不要让它拖垮整个安装。
 # ---------------------------------------------------------------
@@ -571,7 +558,7 @@ check_warp_supported() {
     [ "$WARP" = "1" ] || return 0
 
     purple "正在检测当前 serv00 二进制是否支持 WARP(wireguard outbound)..."
-    local test_conf="${BIN_DIR}/.sounding.json" probe_out
+    local test_conf="${BIN_DIR}/.probe.json" probe_out
     cat > "$test_conf" <<'EOF'
 {
   "outbounds": [
@@ -606,72 +593,6 @@ EOF
 }
 
 # ---------------------------------------------------------------
-# WARP 出站: 运行时故障自动切回直连(Observatory + balancer)能力探测
-#   现状: 默认路由是一条死规则(所有流量强制走 warp-out),WARP 隧道装完之后
-#   如果运行中失效,流量只会失败,不会自动退回 direct——这里探测的是能不能
-#   用 Xray 官方的 Observatory(健康探测) + balancer(fallbackTag) 机制,
-#   让 warp-out 真正挂掉时自动切回 direct,恢复后再自动切回去。
-#
-#   为什么要单独 -test 探测,而不是直接假设支持:
-#   这个第三方重命名二进制的版本/功能集是个黑盒,即便这次 -test 探测本身通过,
-#   也不能 100% 确定 Observatory/balancer 在它内部是真正实现了、还是被静默丢弃的
-#   未知 JSON 字段(Go 的 json.Unmarshal 默认不会因为多余字段报错)。这里用两层
-#   兜底: 1) 用 -test 校验一份包含 balancerTag 的最小路由配置,如果这个二进制的
-#   路由校验逻辑里根本没有"必须指定 outboundTag 或 balancerTag"这层检查、或者
-#   balancer 字段解析失败,大概率会报错,能被下面的关键字捕获; 2) 即便探测通过,
-#   仍然只是"配置语法层面大概率支持",请在实际部署后自行验证一次故障切换效果,
-#   不要仅凭这里探测通过就完全放心。探测失败或探测出错,一律优雅降级回原来的
-#   死规则路由(WARP_FAILOVER=0),不会让安装本身失败。
-# ---------------------------------------------------------------
-check_warp_failover_supported() {
-    export WARP_FAILOVER=0
-    [ "$WARP" = "1" ] || return 0
-
-    purple "正在探测当前二进制是否支持 Observatory+balancer(运行时故障自动切回直连)..."
-    local test_conf="${BIN_DIR}/.current_probe.json" probe_out
-    cat > "$test_conf" <<'EOF'
-{
-  "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
-    {
-      "protocol": "wireguard",
-      "tag": "warp-out",
-      "settings": {
-        "secretKey": "wIol6i8Wl4Wp+i6PXVXwZBoTr6Ez2FZ3+Rjez7cvvV0=",
-        "address": ["172.16.0.2/32"],
-        "peers": [
-          { "publicKey": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=", "endpoint": "162.159.192.1:2408" }
-        ]
-      }
-    }
-  ],
-  "observatory": {
-    "subjectSelector": ["warp-out"],
-    "probeUrl": "https://www.gstatic.com/generate_204",
-    "probeInterval": "30s"
-  },
-  "routing": {
-    "balancers": [
-      { "tag": "warp-balancer", "selector": ["warp-out"], "fallbackTag": "direct" }
-    ],
-    "rules": [
-      { "type": "field", "balancerTag": "warp-balancer", "network": "tcp,udp" }
-    ]
-  }
-}
-EOF
-    probe_out=$("${BIN_DIR}/web" run -test -c "$test_conf" 2>&1)
-    rm -f "$test_conf"
-
-    if echo "$probe_out" | grep -qiE "unknown (outbound |router )?(protocol|config|field)|not registered|invalid (protocol|config)|action or balancer is not specified|balancer.*not (found|defined)|no such (flag|command)|flag provided but not defined"; then
-        yellow "当前二进制不支持 Observatory+balancer,运行时 WARP 失效不会自动切回直连(装机本身不受影响,仍会按原有方式接入 WARP)"
-        return 1
-    fi
-    green "Observatory+balancer 探测通过,将启用运行时故障自动切回直连(建议部署后自行验证一次实际切换效果)"
-    export WARP_FAILOVER=1
-}
-
-# ---------------------------------------------------------------
 # WARP 出站: 自动注册凭据(仅在 WARP=1 且尚未注册过时执行)
 #   - 已存在 WARP_PROFILE 时直接复用,绝不重复注册,避免每次 re/update 都换一个新账号
 #   - 需要生成 X25519 密钥对: 用 openssl 生成后直接从 DER 编码尾部截取 32 字节原始密钥,
@@ -694,19 +615,22 @@ warp_register() {
         export WARP=0; return 1
     fi
 
-    # serv00/ct8 是无 root 权限的共享主机 jail,没有 apt/yum/apk 可用,
-    # 装不上就是装不上,不做无意义的自动安装尝试,直接跳过 WARP
     local py_bin=""
     if command -v python3 >/dev/null 2>&1; then
         py_bin="python3"
+    else
+        (apt-get update -y && apt-get install -y python3) >/dev/null 2>&1 \
+            || yum install -y python3 >/dev/null 2>&1 \
+            || apk add --no-cache python3 >/dev/null 2>&1
+        command -v python3 >/dev/null 2>&1 && py_bin="python3"
     fi
     if [ -z "$py_bin" ]; then
-        red "未找到 python3(解析 WARP 注册结果需要用到,serv00 环境无法自动安装),WARP 出站功能已跳过"
+        red "未找到 python3 且自动安装失败(解析注册结果需要用到),WARP 出站功能已跳过"
         export WARP=0; return 1
     fi
 
     local tmpdir priv_pem priv_key_b64 pub_key_b64
-    tmpdir=$(mktemp -d 2>/dev/null || echo "${BIN_DIR}/.drift")
+    tmpdir=$(mktemp -d 2>/dev/null || echo "${BIN_DIR}/.tmp")
     mkdir -p "$tmpdir"
     priv_pem="${tmpdir}/priv.pem"
     openssl genpkey -algorithm X25519 -out "$priv_pem" >/dev/null 2>&1
@@ -722,7 +646,7 @@ warp_register() {
         export WARP=0; return 1
     fi
 
-    local reg_resp="${BIN_DIR}/.echo.json" tos_ts body
+    local reg_resp="${BIN_DIR}/.reg.json" tos_ts body
     tos_ts=$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || echo "2024-01-01T00:00:00.000Z")
     body=$(printf '{"key":"%s","tos":"%s","type":"PC","model":"PC","locale":"en_US"}' "$pub_key_b64" "$tos_ts")
 
@@ -780,17 +704,6 @@ if [ "$WARP" = "1" ]; then
     step "配置 WARP 出站(平台兼容性检测 + 账号凭据)"
     check_warp_supported
     warp_register
-    # check_warp_failover_supported 默认不再调用:
-    # 实测发现 -test 静态校验通过,不代表这个二进制的 Observatory 探测在运行时
-    # 真的探测成功过——很可能它的健康探测请求本身就没走通,导致 balancer 一直把
-    # warp-out 判定为不健康,所有流量永久 fallback 到 direct,表现为"装的时候显示
-    # 支持故障自动切回,但装出来的节点压根没套上 WARP"。WARP_FAILOVER 保持默认的
-    # 未设置状态,generate_config() 会因此退回没有 balancer 的静态死规则路由——
-    # 这是目前唯一被完整验证过端到端可用的配置。函数本体保留、没有删除,如果之后
-    # 想再验证 Observatory 在这个二进制上是否真能工作,可以手动取消下面这行注释,
-    # 但请务必在生成的节点上做一次真实的"断开WARP观察是否fallback"验证,不要只看
-    # 这里的探测日志。
-    # check_warp_failover_supported
 fi
 
 # ---------------------------------------------------------------
@@ -831,38 +744,17 @@ generate_config() {
                 \"mtu\": 1280
             }
         }"
-        if [ "$WARP_FAILOVER" = "1" ]; then
-            # Observatory 周期性探测 warp-out 是否真的能打通;balancer 平时选 warp-out,
-            # 探测判定它不健康时自动 fallbackTag 切到 direct,恢复健康后自动切回去,
-            # 不需要重启进程、不需要巡检脚本插手。
-            warp_routing=",
-    \"observatory\": {
-        \"subjectSelector\": [\"warp-out\"],
-        \"probeUrl\": \"https://www.gstatic.com/generate_204\",
-        \"probeInterval\": \"30s\"
-    },
-    \"routing\": {
-        \"balancers\": [
-            { \"tag\": \"warp-balancer\", \"selector\": [\"warp-out\"], \"fallbackTag\": \"direct\" }
-        ],
-        \"rules\": [
-            { \"type\": \"field\", \"balancerTag\": \"warp-balancer\", \"network\": \"tcp,udp\" }
-        ]
-    }"
-        else
-            # 探测阶段确认这个二进制不支持 Observatory+balancer,退回原来的死规则:
-            # 所有流量强制走 warp-out,失效时不会自动切回 direct
-            warp_routing=",
+        # 所有非本地流量都走 warp-out;direct 仍保留,供以后需要按域名/IP 分流时使用
+        warp_routing=",
     \"routing\": {
         \"rules\": [
             { \"type\": \"field\", \"outboundTag\": \"warp-out\", \"network\": \"tcp,udp\" }
         ]
     }"
-        fi
     fi
   fi
 
-  cat > "${BIN_DIR}/sonar.json" << EOF
+  cat > "${BIN_DIR}/config.json" << EOF
 {
     "log": {
         "access": "/dev/null",
@@ -900,7 +792,6 @@ generate_config() {
     ]${warp_routing}
 }
 EOF
-  chmod 600 "${BIN_DIR}/sonar.json" >/dev/null 2>&1
 }
 step "生成节点配置"
 generate_config
@@ -910,15 +801,15 @@ generate_config
 # ---------------------------------------------------------------
 start_services() {
   cd "$BIN_DIR" || exit 1
-  nohup ./web -c sonar.json >/dev/null 2>&1 &
+  nohup ./web -c config.json >/dev/null 2>&1 &
   echo $! > "${BIN_DIR}/web.pid"
   sleep 2
-  if pgrep -f "web -c sonar.json" >/dev/null; then
+  if pgrep -f "web -c config.json" >/dev/null; then
       green "xray(web) 运行中"
   else
       red "xray(web) 未运行,重试中..."
       [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid")" >/dev/null 2>&1
-      nohup ./web -c sonar.json >/dev/null 2>&1 &
+      nohup ./web -c config.json >/dev/null 2>&1 &
       echo $! > "${BIN_DIR}/web.pid"
       sleep 2
   fi
@@ -926,7 +817,7 @@ start_services() {
   detect_argo_mode
   case "$ARGO_MODE" in
       token)        args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 run --token ${ARGO_AUTH}" ;;
-      tunnelsecret) args="tunnel --edge-ip-version auto --config ${BIN_DIR}/buoy.yml run" ;;
+      tunnelsecret) args="tunnel --edge-ip-version auto --config ${BIN_DIR}/tunnel.yml run" ;;
       *)            args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile ${WORKDIR}/boot.log --loglevel info --url http://localhost:$PORT" ;;
   esac
   nohup ./bot $args >/dev/null 2>&1 &
@@ -970,14 +861,12 @@ get_argodomain() {
 #   - 生成独立的 healthcheck.sh,探测 xray/cloudflared 是否存活
 #   - 只在状态变化时(正常->异常 / 异常->恢复)推送 TG 消息,不会每次检查都刷屏
 #   - 检测到异常先自动尝试重启,重启成功/失败的结果一并发送
-#   - 调度机制: 仅 crontab 每 5 分钟主动巡检一次,不依赖订阅是否被访问。
-#     (曾用: 订阅每次被请求时用 exec+nohup 触发式唤醒,已彻底移除——该方式会导致
-#      xray 进程被频繁 kill -9 重启,进而打断 WARP 的 wireguard 会话,详见故障排查记录)
+#   - 调度: crontab 每 5 分钟主动巡检一次
 #   - 卸载(de)时由前面定义的 remove_healthcheck_schedule 统一清理,不留定时任务垃圾
 # ---------------------------------------------------------------
 install_healthcheck() {
     if [ -z "$TG_TOKEN" ] || [ -z "$TG_ID" ]; then
-        yellow "未设置 TG_TOKEN / TG_ID,跳过 TG 通知(健康检查脚本仍会安装,供订阅触发式保活使用;如需 TG 通知,带上这两个环境变量重新执行本脚本即可)"
+        yellow "未设置 TG_TOKEN / TG_ID,跳过 TG 通知(健康检查脚本仍会安装并按计划巡检;如需 TG 通知,带上这两个环境变量重新执行本脚本即可)"
     else
         purple "检测到 TG_TOKEN/TG_ID,已启用心跳异常的 TG 通知"
     fi
@@ -986,7 +875,7 @@ install_healthcheck() {
     # BIN_DIR 等变量万一包含特殊字符导致生成的子脚本语法出错
     cat > "$HEALTH_SCRIPT" << 'HEALTHEOF'
 #!/bin/bash
-# 由 vless-argo 主脚本自动生成,请勿手动编辑;重新执行主脚本会覆盖,de 卸载时会自动删除
+# 由主脚本自动生成,请勿手动编辑;重新执行主脚本会覆盖,de 卸载时会自动删除
 # LC_ALL=C: cron/PHP exec() 启动的是全新环境,不会继承主脚本 export 的 LC_ALL,
 # 这里必须显式重设,否则下面 urlencode() 按字节遍历中文/emoji 时会出现编码错误
 export LC_ALL=C
@@ -994,7 +883,7 @@ STATE_FILE="__STATE_FILE__"
 BIN_DIR="__BIN_DIR__"
 HEALTH_STATE_FILE="__HEALTH_STATE__"
 
-# 避免 crontab 巡检和 PHP 触发式唤醒同时并发执行造成重复重启/重复通知:
+# 避免上一轮巡检还没跑完、下一轮 cron 又触发导致重复重启/重复通知:
 # 用 mkdir 实现一把简单的原子锁(比 flock 更兼容 FreeBSD 共享主机环境,不依赖额外命令),
 # 拿不到锁直接退出(不排队等待),因为这本来就是"过一会儿再探测一次"的周期性任务,
 # 错过一次没关系,下一次巡检/下一次订阅请求会再探测。锁目录若因异常残留超过2分钟,
@@ -1067,19 +956,10 @@ is_port_open() {
 }
 
 # xray 是否真正可用:进程存活是前提,但存活不代表能用(配置错、内部异常都可能导致端口没起来),
-# 所以额外加一层本地端口连通性探测,两者都过才算真的"up"。
-# 端口探测重试2次(间隔1秒)才判定为down:单次 /dev/tcp 探测在 serv00 这种共享
-# jail 偶尔会因为瞬时抖动/资源争用超时失败,如果单次失败就直接判 down 触发
-# restart_xray()(kill -9 重启),等于每次抖动都会强行打断一次 WARP 的 wireguard
-# 会话,得不偿失——多探测几次能明显降低"没真坏也被强制重启"的概率。
+# 所以额外加一层本地端口连通性探测,两者都过才算真的"up"
 is_alive_xray() {
     [ -f "${BIN_DIR}/web.pid" ] && kill -0 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1 || return 1
-    local attempt
-    for attempt in 1 2 3; do
-        is_port_open "$SAVED_PORT" && return 0
-        [ "$attempt" -lt 3 ] && sleep 1
-    done
-    return 1
+    is_port_open "$SAVED_PORT"
 }
 
 is_alive_cf() {
@@ -1088,7 +968,7 @@ is_alive_cf() {
 
 restart_xray() {
     [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1
-    ( cd "$BIN_DIR" && nohup ./web -c sonar.json >/dev/null 2>&1 & echo $! > "${BIN_DIR}/web.pid" )
+    ( cd "$BIN_DIR" && nohup ./web -c config.json >/dev/null 2>&1 & echo $! > "${BIN_DIR}/web.pid" )
     sleep 3
     is_alive_xray
 }
@@ -1166,7 +1046,7 @@ fi
 if [ -n "$prev_domain" ] && [ -n "$cur_domain" ] && [ "$prev_domain" != "$cur_domain" ]; then
     # 域名变了,直接拼出新的 vless:// 链接一起推送,不用让用户自己去猜怎么改;
     # 拼接公式必须和主脚本 generate_links() 里的保持完全一致,否则两边生成的链接会不一样
-    new_link="vless://${SAVED_UUID}@${SAVED_CFIP}:${SAVED_CFPORT}?encryption=none&security=tls&sni=${cur_domain}&type=ws&host=${cur_domain}&path=%2Fdata-sync%3Fed%3D2560#oceanus-node-$(hostname)"
+    new_link="vless://${SAVED_UUID}@${SAVED_CFIP}:${SAVED_CFPORT}?encryption=none&security=tls&sni=${cur_domain}&type=ws&host=${cur_domain}&path=%2Fdata-sync%3Fed%3D2560#${SAVED_USERNAME:-$(hostname)}"
     msg="${msg}🔄 Argo隧道域名已变化: ${prev_domain} → ${cur_domain}"$'\n'"新节点链接:"$'\n'"${new_link}"$'\n'
     # 同步刷新私有链接文件(Token.php 每次请求都会实时读取这个文件,不再维护公开的 .log 副本)
     if [ -n "$SAVED_WORKDIR" ] && [ -d "$SAVED_WORKDIR" ]; then
@@ -1331,9 +1211,7 @@ HTMLEOF
 
 # ---------------------------------------------------------------
 # 生成订阅链接(vless://)
-#   保活: 只依赖内部 crontab 每5分钟巡检(见 install_healthcheck),
-#         .php 本身不再触发任何保活动作,纯只读输出订阅内容。
-#   只保留 .php 一个订阅入口,不再额外维护公开的 .log 静态文件:
+#   只保留 .php 一个订阅入口,不再额外维护公开的静态副本:
 #   节点链接实际存放在 WORKDIR 下的私有文件 current_link.txt(不在 public_html 内,不会被外部直接访问),
 #   .php 每次请求都会实时读取它,quick tunnel 域名轮换后 healthcheck.sh 更新这一份文件即可,
 #   订阅内容和保活来源统一,不会出现两边不同步的情况。
@@ -1343,7 +1221,7 @@ generate_links() {
   argodomain=$(get_argodomain)
   echo -e "\e[1;32mArgoDomain: \e[1;35m${argodomain}\e[0m\n"
 
-  NAME="oceanus-node-${USERNAME}"
+  NAME="${USERNAME}"
   LINK="vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&type=ws&host=${argodomain}&path=%2Fdata-sync%3Fed%3D2560#${NAME}"
 
   devil www add "${USERNAME}.${CURRENT_DOMAIN}" php > /dev/null 2>&1
@@ -1357,11 +1235,10 @@ generate_links() {
   chmod 600 "$LINK_FILE" >/dev/null 2>&1
 
   # 创建标准订阅 PHP 文件（一行一个节点，支持未来扩展）
-  cat > "${FILE_PATH}/${SUB_TOKEN}_sync.php" << 'PHPEOF'
+  cat > "${FILE_PATH}/${SUB_TOKEN}_feed.php" << 'PHPEOF'
 <?php
-// 标准订阅 + 刷新即手动保活 by Go_Real_Serv00.sh
-// 节点链接从私有文件(不在 public_html 下)动态读取,quick tunnel 域名轮换后
-// healthcheck.sh 更新该文件即可让本订阅自动跟着变,无需重装、无需手动改文件。
+// 数据源来自站点日志目录下的私有文件(不在本目录下),域名轮换后由后台巡检脚本
+// 自动更新该文件,本文件无需手动改动。
 
 header('Content-Type: text/plain; charset=utf-8');
 header('Subscription-Userinfo: upload=0; download=0; total=107374182400; expire=0'); // 伪装流量统计
@@ -1384,38 +1261,35 @@ $nodes = [
 
 // 输出标准订阅格式（一行一个节点）
 echo implode("\n", array_filter($nodes));
-
-// 保活只走内部 crontab 每5分钟巡检(见主脚本 install_healthcheck),
-// 本文件不再触发任何保活动作,纯粹只读输出订阅内容。
 ?>
 PHPEOF
 
   # 替换占位符（兼容 FreeBSD sed）
-  # 注意: LINK/LINK_FILE/HEALTH_SCRIPT 都必须先过 sed_repl_escape 再放进替换位置,
+  # 注意: LINK/LINK_FILE 都必须先过 sed_repl_escape 再放进替换位置,
   # 否则 LINK 里的 & (query string 分隔符) 会被 sed 当成特殊符号处理,把链接冲坏。
-  local php_tmp="${FILE_PATH}/${SUB_TOKEN}_sync.php.tmp.$$"
+  local php_tmp="${FILE_PATH}/${SUB_TOKEN}_feed.php.tmp.$$"
   local link_esc link_file_esc
   link_esc=$(sed_repl_escape "$LINK")
   link_file_esc=$(sed_repl_escape "$LINK_FILE")
   sed \
     -e "s|REPLACE_WITH_LINK_FILE|${link_file_esc}|g" \
     -e "s|REPLACE_WITH_LINK|${link_esc}|g" \
-    "${FILE_PATH}/${SUB_TOKEN}_sync.php" > "$php_tmp" && mv "$php_tmp" "${FILE_PATH}/${SUB_TOKEN}_sync.php"
+    "${FILE_PATH}/${SUB_TOKEN}_feed.php" > "$php_tmp" && mv "$php_tmp" "${FILE_PATH}/${SUB_TOKEN}_feed.php"
 
-  chmod 644 "${FILE_PATH}/${SUB_TOKEN}_sync.php" >/dev/null 2>&1
+  chmod 644 "${FILE_PATH}/${SUB_TOKEN}_feed.php" >/dev/null 2>&1
 
   install_homepage
 
   echo "$LINK"
 
-  green "\n订阅链接（唯一入口，域名轮换后自动同步，无订阅触发保活）: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_sync.php"
+  green "\n订阅链接（唯一入口，域名轮换后自动同步）: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_feed.php"
   rm -rf "${WORKDIR}/boot.log"
 }
 
 step "生成订阅链接"
 generate_links
 
-purple "\n[附加] 配置心跳监控(内部巡检，无订阅触发，仅cron每5分钟)"
+purple "\n[附加] 配置心跳监控(内部巡检，cron每5分钟一次)"
 install_healthcheck
 
 case "$ACTION" in
@@ -1424,5 +1298,5 @@ case "$ACTION" in
     *) green "\nRunning done! (platform: serv00/ct8)\n" ;;
 esac
 
-green "订阅地址: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_sync.php"
+green "订阅地址: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_feed.php"
 green "站点首页(伪装页,不含节点信息): https://${USERNAME}.${CURRENT_DOMAIN}/"
