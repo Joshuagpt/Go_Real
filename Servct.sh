@@ -1,7 +1,8 @@
 #!/bin/bash
 # ===================================================================
-# VLESS+WS+Argo 一键部署 —— serv00/ct8 专版（精简优化版）
+# VLESS+WS+Argo 一键部署 —— serv00/ct8 专版（动态数字版）
 # 优化：配置文件 .json、目录伪装、监控解耦、状态后置、无强制退出
+# 主页：Project Oceanus 精美设计，传感器数字随机增减（±1~3）
 # ===================================================================
 
 if [ -z "$BASH_VERSION" ]; then
@@ -557,11 +558,9 @@ EOF
 step "生成节点配置"
 generate_config
 
-# ========== 启动服务（简单模式，失败不退出） ==========
 start_services() {
   cd "$BIN_DIR" || exit 1
 
-  # 启动 xray
   nohup ./web -c "${CONFIG_FILE}" >/dev/null 2>&1 &
   echo $! > "${BIN_DIR}/web.pid"
   sleep 2
@@ -571,7 +570,6 @@ start_services() {
       red "xray(web) 未运行，请检查配置"
   fi
 
-  # 启动 cloudflared
   detect_argo_mode
   case "$ARGO_MODE" in
       token)        args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --config ${BIN_DIR}/${TUNNEL_CONFIG} run" ;;
@@ -605,16 +603,118 @@ get_argodomain() {
   fi
 }
 
+# ==================== 精致主页（数字随机增减） ====================
 install_homepage() {
     local homepage="${FILE_PATH}/index.html"
     cat > "$homepage" <<'HTMLEOF'
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Project Oceanus</title>
-<style>:root{--deep-blue:#050b14;--cyan:#64ffda;--text-main:#ccd6f6;--text-muted:#8892b0}body{margin:0;padding:0;background:#050b14;color:#ccd6f6;font-family:sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh}.container{width:90%;max-width:580px;background:rgba(10,25,47,0.65);backdrop-filter:blur(20px);border:1px solid rgba(100,255,218,0.1);border-radius:16px;padding:45px 40px;text-align:center}h1{color:#e6f1ff}.cyan{color:#64ffda}.footer{margin-top:20px;font-size:0.8rem;color:var(--text-muted)}</style>
-</head><body><div class="container"><h1>Project Oceanus</h1><p class="cyan">Global Marine Ecology Initiative</p><p style="color:#8892b0;text-align:justify">Dedicated to deep-sea ecosystem preservation. Acoustic sensor network monitoring water quality, thermal currents, and microplastics.</p><div class="footer">&copy; 2026 Project Oceanus</div></div></body></html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project Oceanus - Marine Ecology Monitoring</title>
+<style>
+  :root {
+    --deep-blue: #050b14;
+    --water: #0a192f;
+    --cyan: #64ffda;
+    --text-main: #ccd6f6;
+    --text-muted: #8892b0;
+  }
+  body {
+    margin: 0;
+    padding: 0;
+    background-color: var(--deep-blue);
+    background-image:
+      radial-gradient(circle at 15% 50%, rgba(100, 255, 218, 0.08), transparent 25%),
+      radial-gradient(circle at 85% 30%, rgba(10, 25, 47, 0.8), transparent 25%);
+    color: var(--text-main);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+  .orb {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(80px);
+    opacity: 0.5;
+    animation: float 10s infinite alternate ease-in-out;
+    z-index: 0;
+  }
+  .orb-1 { width: 300px; height: 300px; background: #112240; top: -100px; left: -100px; }
+  .orb-2 { width: 400px; height: 400px; background: rgba(100, 255, 218, 0.04); bottom: -150px; right: -100px; animation-delay: -5s; }
+  .container {
+    position: relative;
+    z-index: 1;
+    width: 90%;
+    max-width: 580px;
+    background: rgba(10, 25, 47, 0.65);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(100, 255, 218, 0.1);
+    border-radius: 16px;
+    padding: 45px 40px;
+    box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+  }
+  .header { text-align: center; margin-bottom: 25px; }
+  .logo { display: inline-block; width: 48px; height: 48px; border: 2px solid var(--cyan); border-radius: 50%; margin-bottom: 18px; position: relative; }
+  .logo::after { content: ''; position: absolute; top: 10px; left: 10px; right: 10px; bottom: 10px; background: var(--cyan); border-radius: 50%; animation: pulse 2.5s infinite ease-in-out; }
+  h1 { margin: 0; font-weight: 600; font-size: 1.7rem; color: #e6f1ff; letter-spacing: 1px; }
+  p.subtitle { color: var(--cyan); font-size: 0.85rem; margin-top: 8px; text-transform: uppercase; letter-spacing: 2px; }
+  .content { color: var(--text-muted); line-height: 1.65; text-align: justify; font-size: 0.95rem; margin-bottom: 35px; }
+  .stats-container { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 35px; }
+  .stat-box { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 10px; padding: 16px 10px; text-align: center; }
+  .stat-value { display: block; color: var(--text-main); font-size: 1.25rem; font-weight: bold; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+  .stat-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; margin-top: 6px; letter-spacing: 0.5px; }
+  .footer { text-align: center; font-size: 0.8rem; color: rgba(136, 146, 176, 0.5); border-top: 1px solid rgba(136, 146, 176, 0.1); padding-top: 25px; line-height: 1.6; }
+  @keyframes float { 0% { transform: translateY(0) scale(1); } 100% { transform: translateY(-30px) scale(1.05); } }
+  @keyframes pulse { 0% { transform: scale(0.9); opacity: 0.8; } 50% { transform: scale(1.1); opacity: 0.3; } 100% { transform: scale(0.9); opacity: 0.8; } }
+  @media (max-width: 480px) { .stats-container { grid-template-columns: 1fr; } .container { padding: 35px 25px; } }
+</style>
+</head>
+<body>
+  <div class="orb orb-1"></div>
+  <div class="orb orb-2"></div>
+  <div class="container">
+    <div class="header">
+      <div class="logo"></div>
+      <h1>Project Oceanus</h1>
+      <p class="subtitle">Global Marine Ecology Initiative</p>
+    </div>
+    <div class="content">
+      Dedicated to the preservation of the world's most fragile deep-sea ecosystems. Our autonomous acoustic sensor network continuously analyzes water quality, thermal currents, and microplastic concentrations across oceanic trenches, providing open-source foundational data for marine biologists worldwide.
+    </div>
+    <div class="stats-container">
+      <div class="stat-box"><span class="stat-value" id="buoy-count">1,024</span><span class="stat-label">Active Sensors</span></div>
+      <div class="stat-box"><span class="stat-value">10,984m</span><span class="stat-label">Max Depth</span></div>
+      <div class="stat-box"><span class="stat-value" style="color: var(--cyan);">Syncing</span><span class="stat-label">Network Status</span></div>
+    </div>
+    <div class="footer">
+      &copy; 2026 Project Oceanus Non-Profit Foundation.<br>
+      <i>Authorized researchers: Append your institutional access token to the URL path.</i>
+    </div>
+  </div>
+  <script>
+    setInterval(() => {
+      const el = document.getElementById('buoy-count');
+      let val = parseInt(el.innerText.replace(/,/g, ''));
+      // 随机增减 1~3
+      let delta = Math.floor(Math.random() * 3) + 1;
+      if (Math.random() < 0.5) delta = -delta;
+      val += delta;
+      if (val < 0) val = 0; // 避免负数
+      el.innerText = val.toLocaleString();
+    }, 4000);
+  </script>
+</body>
+</html>
 HTMLEOF
     chmod 644 "$homepage" >/dev/null 2>&1
 }
+# ================================================================
 
 generate_links() {
   argodomain=$(get_argodomain)
@@ -657,7 +757,6 @@ PHPEOF
 step "生成订阅链接"
 generate_links
 
-# ========== 健康检查（保留优化） ==========
 install_healthcheck() {
     if [ -z "$TG_TOKEN" ] || [ -z "$TG_ID" ]; then
         yellow "未设置 TG_TOKEN / TG_ID,跳过 TG 通知"
