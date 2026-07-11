@@ -1,14 +1,14 @@
 #!/bin/bash
 # ===================================================================
-# VLESS+WS+Argo 一键部署 —— serv00/ct8 专版（稳健优化版）
-# 改动：配置文件 .json、启动重试、监控解耦、状态后置、目录伪装
+# VLESS+WS+Argo 一键部署 —— serv00/ct8 专版（精简优化版）
+# 优化：配置文件 .json、目录伪装、监控解耦、状态后置、无强制退出
 # ===================================================================
 
 if [ -z "$BASH_VERSION" ]; then
     if command -v bash >/dev/null 2>&1; then
         exec bash "$0" "$@"
     else
-        echo "本脚本需要 bash, 请先确认 bash 可用后重试" >&2
+        echo "本脚本需要 bash" >&2
         exit 1
     fi
 fi
@@ -106,13 +106,12 @@ else
 fi
 WORKDIR="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/logs"
 FILE_PATH="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/public_html"
-BIN_DIR="${HOME}/.oceanus"                    # 伪装目录
+BIN_DIR="${HOME}/.oceanus"
 STATE_FILE="${BIN_DIR}/.current.log"
 
-# 配置文件名称（保留 .json 扩展名，确保 Xray 识别）
 CONFIG_FILE="service.json"
-CRED_FILE="cred.json"                         # 保持原名，内容为 JSON
-TUNNEL_CONFIG="tunnel.yml"                    # 保持 .yml，cloudflared 识别
+CRED_FILE="cred.json"
+TUNNEL_CONFIG="tunnel.yml"
 
 load_state() {
     [ -f "$STATE_FILE" ] || return 0
@@ -159,7 +158,6 @@ do_uninstall() {
     remove_healthcheck_schedule
     graceful_kill_pidfile "${BIN_DIR}/web.pid"
     graceful_kill_pidfile "${BIN_DIR}/bot.pid"
-    # 额外清理可能残留的进程（保险）
     pkill -f "${BIN_DIR}/web" >/dev/null 2>&1
     pkill -f "${BIN_DIR}/bot" >/dev/null 2>&1
     devil www del "${USERNAME}.${CURRENT_DOMAIN}" >/dev/null 2>&1
@@ -376,7 +374,6 @@ ingress:
   - service: http_status:404
 EOF
   else
-    # Token 模式：写入配置文件，避免命令行暴露
     cat > "${BIN_DIR}/${TUNNEL_CONFIG}" << EOF
 token: ${ARGO_AUTH}
 EOF
@@ -560,28 +557,18 @@ EOF
 step "生成节点配置"
 generate_config
 
-# ========== 启动服务（增强检测，失败则退出） ==========
+# ========== 启动服务（简单模式，失败不退出） ==========
 start_services() {
   cd "$BIN_DIR" || exit 1
 
-  # 启动 xray，最多尝试两次
-  local web_ok=0
-  for attempt in 1 2; do
-    nohup ./web -c "${CONFIG_FILE}" >/dev/null 2>&1 &
-    echo $! > "${BIN_DIR}/web.pid"
-    sleep 2
-    if [ -f "${BIN_DIR}/web.pid" ] && kill -0 "$(cat "${BIN_DIR}/web.pid")" 2>/dev/null; then
+  # 启动 xray
+  nohup ./web -c "${CONFIG_FILE}" >/dev/null 2>&1 &
+  echo $! > "${BIN_DIR}/web.pid"
+  sleep 2
+  if [ -f "${BIN_DIR}/web.pid" ] && kill -0 "$(cat "${BIN_DIR}/web.pid")" 2>/dev/null; then
       green "xray(web) 运行中"
-      web_ok=1
-      break
-    else
-      red "xray(web) 启动失败 (尝试 ${attempt}/2)"
-      [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid")" 2>/dev/null
-    fi
-  done
-  if [ "$web_ok" -eq 0 ]; then
-    red "xray(web) 两次启动均失败，请检查 ${BIN_DIR}/${CONFIG_FILE} 配置或端口 ${PORT} 是否被占用"
-    exit 1
+  else
+      red "xray(web) 未运行，请检查配置"
   fi
 
   # 启动 cloudflared
@@ -597,7 +584,7 @@ start_services() {
   if [ -f "${BIN_DIR}/bot.pid" ] && kill -0 "$(cat "${BIN_DIR}/bot.pid")" 2>/dev/null; then
       green "cloudflared(bot) 运行中"
   else
-      red "cloudflared(bot) 启动失败，但继续执行（隧道可能无法工作）"
+      red "cloudflared(bot) 未运行，隧道可能无法工作"
   fi
 }
 step "启动服务"
@@ -645,7 +632,6 @@ generate_links() {
   cat > "${FILE_PATH}/${SUB_TOKEN}_feed.php" << 'PHPEOF'
 <?php
 header('Content-Type: text/plain; charset=utf-8');
-header('Subscription-Userinfo: upload=0; download=0; total=107374182400; expire=0');
 $link_file = 'REPLACE_WITH_LINK_FILE';
 $fallback_link = 'REPLACE_WITH_LINK';
 $link = @file_get_contents($link_file);
@@ -665,14 +651,13 @@ PHPEOF
   install_homepage
   echo "$LINK"
   green "\n订阅链接: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_feed.php"
-  # 清空日志，避免长期留存
   : > "${WORKDIR}/boot.log" 2>/dev/null
 }
 
 step "生成订阅链接"
 generate_links
 
-# ========== 健康检查（增加延迟重试、配置解耦） ==========
+# ========== 健康检查（保留优化） ==========
 install_healthcheck() {
     if [ -z "$TG_TOKEN" ] || [ -z "$TG_ID" ]; then
         yellow "未设置 TG_TOKEN / TG_ID,跳过 TG 通知"
@@ -696,13 +681,11 @@ mkdir "$LOCK_DIR" 2>/dev/null || exit 0
 trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
 [ -f "$STATE_FILE" ] || exit 0
-# 安全加载状态文件
 if ! bash -n "$STATE_FILE" 2>/dev/null; then
     exit 0
 fi
 source "$STATE_FILE"
 
-# 默认配置文件（兼容老版本）
 : "${SAVED_CONFIG_FILE:=service.json}"
 
 TG_TOKEN="$SAVED_TG_TOKEN"
@@ -799,7 +782,6 @@ cur_cf="down"; is_alive_cf && cur_cf="up"
 cf_restarted=0
 msg=""
 
-# ----- xray 检测（延迟10秒重试） -----
 if [ "$cur_xray" = "down" ] && [ "$prev_xray" != "down" ]; then
     sleep 10
     if is_alive_xray; then
@@ -816,7 +798,6 @@ elif [ "$cur_xray" = "up" ] && [ "$prev_xray" = "down" ]; then
     msg="${msg}✅ xray 已恢复\n"
 fi
 
-# ----- cloudflared 检测（延迟10秒重试） -----
 if [ "$cur_cf" = "down" ] && [ "$prev_cf" != "down" ]; then
     sleep 10
     if is_alive_cf; then
@@ -834,7 +815,6 @@ elif [ "$cur_cf" = "up" ] && [ "$prev_cf" = "down" ]; then
     msg="${msg}✅ cloudflared 已恢复\n"
 fi
 
-# 域名更新（仅 quick 模式）
 if [ "$cf_restarted" = "1" ]; then
     cur_domain="$(get_current_domain 6)"
 else
@@ -879,7 +859,6 @@ EOF
 purple "\n[附加] 配置心跳监控"
 install_healthcheck
 
-# ---------- 所有步骤成功，最后保存状态 ----------
 save_state
 
 case "$ACTION" in
