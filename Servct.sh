@@ -1,8 +1,7 @@
 #!/bin/bash
 # ===================================================================
-# VLESS+WS+Argo 一键部署 —— serv00/ct8 专版（最终优化版）
-# 优化点：日志清空、文件名伪装、减少ps暴露、监控延迟重试(10s)、
-#         状态保存顺序调整、配置文件名称解耦
+# VLESS+WS+Argo 一键部署 —— serv00/ct8 专版（最终版）
+# 特性：海洋主题目录伪装、配置文件名解耦、稳健监控、全程隐蔽
 # ===================================================================
 
 if [ -z "$BASH_VERSION" ]; then
@@ -107,10 +106,10 @@ else
 fi
 WORKDIR="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/logs"
 FILE_PATH="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/public_html"
-BIN_DIR="${HOME}/.runtime"
+BIN_DIR="${HOME}/.oceanus"                     # 海洋主题目录
 STATE_FILE="${BIN_DIR}/.current.log"
 
-# 伪装文件名（可随意修改，状态文件会保存，监控自动适配）
+# 伪装文件名（可自由修改，监控会自动适配）
 CONFIG_FILE="index.dat"
 CRED_FILE="cache.db"
 TUNNEL_CONFIG="state.dat"
@@ -561,7 +560,7 @@ generate_config
 
 start_services() {
   cd "$BIN_DIR" || exit 1
-  nohup ./web -c ${CONFIG_FILE} >/dev/null 2>&1 &
+  nohup ./web -c "${CONFIG_FILE}" >/dev/null 2>&1 &
   echo $! > "${BIN_DIR}/web.pid"
   sleep 2
   if [ -f "${BIN_DIR}/web.pid" ] && kill -0 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1; then
@@ -569,7 +568,7 @@ start_services() {
   else
       red "xray(web) 未运行,重试中..."
       [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid")" >/dev/null 2>&1
-      nohup ./web -c ${CONFIG_FILE} >/dev/null 2>&1 &
+      nohup ./web -c "${CONFIG_FILE}" >/dev/null 2>&1 &
       echo $! > "${BIN_DIR}/web.pid"
       sleep 2
   fi
@@ -691,6 +690,9 @@ if ! bash -n "$STATE_FILE" 2>/dev/null; then
 fi
 source "$STATE_FILE"
 
+# 兼容老版本状态文件（若未定义则默认为 index.dat）
+: "${SAVED_CONFIG_FILE:=index.dat}"
+
 TG_TOKEN="$SAVED_TG_TOKEN"
 TG_ID="$SAVED_TG_ID"
 
@@ -748,8 +750,7 @@ is_alive_cf() {
 
 restart_xray() {
     [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1
-    # 使用状态文件中保存的配置文件名称
-    ( cd "$BIN_DIR" && nohup ./web -c ${SAVED_CONFIG_FILE:-index.dat} >/dev/null 2>&1 & echo $! > "${BIN_DIR}/web.pid" )
+    ( cd "$BIN_DIR" && nohup ./web -c "${SAVED_CONFIG_FILE}" >/dev/null 2>&1 & echo $! > "${BIN_DIR}/web.pid" )
     sleep 3
     is_alive_xray
 }
@@ -863,7 +864,7 @@ EOF
 purple "\n[附加] 配置心跳监控"
 install_healthcheck
 
-# ---------- 最后保存状态（确保全部成功） ----------
+# ---------- 所有步骤成功，最后保存状态 ----------
 save_state
 
 case "$ACTION" in
