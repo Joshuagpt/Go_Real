@@ -1,7 +1,7 @@
 #!/bin/bash
 # ===================================================================
-# VLESS+WS+Argo 一键部署 —— serv00/ct8 专版（最终版）
-# 特性：海洋主题目录伪装、配置文件名解耦、稳健监控、全程隐蔽
+# VLESS+WS+Argo 一键部署 —— serv00/ct8 专版（最终稳定版）
+# 特性：海洋主题目录、配置解耦、启动失败保护、稳健监控
 # ===================================================================
 
 if [ -z "$BASH_VERSION" ]; then
@@ -106,7 +106,7 @@ else
 fi
 WORKDIR="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/logs"
 FILE_PATH="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/public_html"
-BIN_DIR="${HOME}/.oceanus"                     # 海洋主题目录
+BIN_DIR="${HOME}/.oceanus"
 STATE_FILE="${BIN_DIR}/.current.log"
 
 # 伪装文件名（可自由修改，监控会自动适配）
@@ -558,21 +558,31 @@ EOF
 step "生成节点配置"
 generate_config
 
+# ===================== 关键修改：启动服务并确保成功 =====================
 start_services() {
   cd "$BIN_DIR" || exit 1
-  nohup ./web -c "${CONFIG_FILE}" >/dev/null 2>&1 &
-  echo $! > "${BIN_DIR}/web.pid"
-  sleep 2
-  if [ -f "${BIN_DIR}/web.pid" ] && kill -0 "$(cat "${BIN_DIR}/web.pid" 2>/dev/null)" >/dev/null 2>&1; then
+
+  # 启动 xray，最多尝试两次
+  local web_ok=0
+  for attempt in 1 2; do
+    nohup ./web -c "${CONFIG_FILE}" >/dev/null 2>&1 &
+    echo $! > "${BIN_DIR}/web.pid"
+    sleep 2
+    if [ -f "${BIN_DIR}/web.pid" ] && kill -0 "$(cat "${BIN_DIR}/web.pid")" 2>/dev/null; then
       green "xray(web) 运行中"
-  else
-      red "xray(web) 未运行,重试中..."
-      [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid")" >/dev/null 2>&1
-      nohup ./web -c "${CONFIG_FILE}" >/dev/null 2>&1 &
-      echo $! > "${BIN_DIR}/web.pid"
-      sleep 2
+      web_ok=1
+      break
+    else
+      red "xray(web) 启动失败 (尝试 ${attempt}/2)"
+      [ -f "${BIN_DIR}/web.pid" ] && kill -9 "$(cat "${BIN_DIR}/web.pid")" 2>/dev/null
+    fi
+  done
+  if [ "$web_ok" -eq 0 ]; then
+    red "xray(web) 两次启动均失败，请检查 ${BIN_DIR}/${CONFIG_FILE} 配置或端口 ${PORT} 是否被占用"
+    exit 1
   fi
 
+  # 启动 cloudflared
   detect_argo_mode
   case "$ARGO_MODE" in
       token)        args="tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --config ${BIN_DIR}/${TUNNEL_CONFIG} run" ;;
@@ -582,14 +592,11 @@ start_services() {
   nohup ./bot $args >/dev/null 2>&1 &
   echo $! > "${BIN_DIR}/bot.pid"
   sleep 2
-  if [ -f "${BIN_DIR}/bot.pid" ] && kill -0 "$(cat "${BIN_DIR}/bot.pid" 2>/dev/null)" >/dev/null 2>&1; then
+  if [ -f "${BIN_DIR}/bot.pid" ] && kill -0 "$(cat "${BIN_DIR}/bot.pid")" 2>/dev/null; then
       green "cloudflared(bot) 运行中"
   else
-      red "cloudflared(bot) 未运行,重试中..."
-      [ -f "${BIN_DIR}/bot.pid" ] && kill -9 "$(cat "${BIN_DIR}/bot.pid")" >/dev/null 2>&1
-      nohup ./bot $args >/dev/null 2>&1 &
-      echo $! > "${BIN_DIR}/bot.pid"
-      sleep 2
+      red "cloudflared(bot) 启动失败，但继续执行（隧道可能无法工作）"
+      # 不退出，因为 xray 已启动，隧道失败不影响节点本身，但会影响外部访问
   fi
 }
 step "启动服务"
