@@ -101,7 +101,7 @@ ingress:
   - service: http_status:404
 EOF
   else
-    yellow "当前使用的是token,请在cloudflare后台设置隧道端口为${purple}${PORT}${re}"
+    yellow "当前使用的是token,请在云flare后台设置隧道端口为${purple}${PORT}${re}"
   fi
 }
 argo_configure
@@ -291,7 +291,7 @@ install_keepalive () {
     devil www add keep.${USERNAME}.${CURRENT_DOMAIN} nodejs /usr/local/bin/node18 > /dev/null 2>&1
     keep_path="$HOME/domains/keep.${USERNAME}.${CURRENT_DOMAIN}/public_nodejs"
     [ -d "$keep_path" ] || mkdir -p "$keep_path"
-    app_file_url="https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/vless.js"
+    app_file_url="https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/alive.js"
     $COMMAND "${keep_path}/app.js" "$app_file_url"
     
     cat > ${keep_path}/.env <<EOF
@@ -339,11 +339,11 @@ generate_links() {
   sleep 1
   get_name() { if [ "$HOSTNAME" = "s1.ct8.pl" ]; then SERVER="CT8"; else SERVER=$(echo "$HOSTNAME" | cut -d '.' -f 1); fi; echo "$SERVER"; }
   NAME=$(get_name)-${USERNAME}
-  cat > ${FILE_PATH}/${SUB_TOKEN}_vless.log <<EOF
+  cat > ${FILE_PATH}/${SUB_TOKEN}.log <<EOF
 vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&type=ws&host=${argodomain}&path=%2F%3Fed%3D2560#${NAME}
 EOF
-  cat ${FILE_PATH}/${SUB_TOKEN}_vless.log
-  green "\n订阅连接: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_vless.log 适用于V2ranN/Nekobox/Karing/小火箭/sterisand/Loon 等\n" 
+  cat ${FILE_PATH}/${SUB_TOKEN}.log
+  green "\n订阅连接: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}.log 适用于V2ranN/Nekobox/Karing/小火箭/sterisand/Loon 等\n" 
   rm -rf config.json fake_useragent_0.2.0.json ${WORKDIR}/boot.log ${WORKDIR}/tunnel.json ${WORKDIR}/tunnel.yml 
   install_keepalive
 }
