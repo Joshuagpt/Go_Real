@@ -54,10 +54,10 @@ TG_TOKEN="..." TG_ID="..." bash <(curl -Ls https://raw.githubusercontent.com/Jos
 
 > 
 
-<h2>✅ Servctx</h2>           
+<h2>✅ 00_vl</h2>           
 
 ```bash
-UUID="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Servctx.sh)
+UUID="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl.sh)
 ```
 
 >
