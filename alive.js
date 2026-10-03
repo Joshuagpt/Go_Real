@@ -30,7 +30,7 @@ const RESTART_URL = `http://keep.${USERNAME}.${CURRENT_DOMAIN}/restart`;
 const START_URL = `http://keep.${USERNAME}.${CURRENT_DOMAIN}/${USERNAME}`;
 const LIST_URL = `http://keep.${USERNAME}.${CURRENT_DOMAIN}/list`;
 const STATUS_URL = `http://keep.${USERNAME}.${CURRENT_DOMAIN}/status`;
-const SUB_URL = `https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_vless.log`;
+const SUB_URL = `https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}.log`;
 
 const services = [
   { name: 'xray', match: /-c config\.json/ },
