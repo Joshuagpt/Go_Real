@@ -76,7 +76,7 @@ check_port () {
   fi
 
   export PORT=$tcp_port1
-  purple "vless-argo使用tcp端口: $tcp_port1"
+  purple "使用tcp端口: $tcp_port1"
 }
 check_port
 
@@ -181,7 +181,7 @@ generate_config() {
     },
     "inbounds":[
         {
-          "tag":"vless-ws",
+          "tag":"ws-in",
           "port": ${PORT},
           "listen": "0.0.0.0",
           "protocol": "vless",
@@ -197,7 +197,7 @@ generate_config() {
             "streamSettings": {
                 "network": "ws",
                 "wsSettings": {
-                    "path": "/vless-argo"
+                    "path": "/"
                 }
             }
         }
@@ -338,9 +338,9 @@ generate_links() {
   echo -e "\e[1;32mArgoDomain: \e[1;35m${argodomain}\e[0m\n"
   sleep 1
   get_name() { if [ "$HOSTNAME" = "s1.ct8.pl" ]; then SERVER="CT8"; else SERVER=$(echo "$HOSTNAME" | cut -d '.' -f 1); fi; echo "$SERVER"; }
-  NAME=$(get_name)-vless-argo-${USERNAME}
+  NAME=$(get_name)-${USERNAME}
   cat > ${FILE_PATH}/${SUB_TOKEN}_vless.log <<EOF
-vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&type=ws&host=${argodomain}&path=%2Fvless-argo%3Fed%3D2560#${NAME}
+vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&type=ws&host=${argodomain}&path=%2F%3Fed%3D2560#${NAME}
 EOF
   cat ${FILE_PATH}/${SUB_TOKEN}_vless.log
   green "\n订阅连接: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}_vless.log 适用于V2ranN/Nekobox/Karing/小火箭/sterisand/Loon 等\n" 
