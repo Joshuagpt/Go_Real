@@ -327,7 +327,12 @@ EOF
         purple "访问 http://keep.${USERNAME}.${CURRENT_DOMAIN}/list 全部进程列表\n"
         yellow "访问 http://keep.${USERNAME}.${CURRENT_DOMAIN}/${USERNAME} 调起保活程序   备用保活路径: /run  /go  /start\n"
         purple "访问 http://keep.${USERNAME}.${CURRENT_DOMAIN}/status 查看进程状态\n\n"
-        purple "如果需要TG通知,在${yellow}https://t.me/laowang_serv00_bot${re}${purple}获取CHAT_ID,并带CHAT_ID环境变量运行${re}\n\n"
+        if [[ -n "$CHAT_ID" && -n "$BOT_TOKEN" ]]; then
+            green "Telegram 通知已生效（CHAT_ID: ${CHAT_ID}）\n\n"
+        else
+            purple "如需开启 Telegram 通知，请在脚本中添加以下变量后重新运行：\n"
+            yellow "CHAT_ID 和 BOT_TOKEN\n"
+        fi
     else
         red "\n全自动保活服务安装失败,存在未运行的进程\n访问 ${yellow}http://keep.${USERNAME}.${CURRENT_DOMAIN}/status ${red}检查,建议执行以下命令后重装: \n\ndevil www del ${USERNAME}.${CURRENT_DOMAIN}\ndevil www del keep.${USERNAME}.${CURRENT_DOMAIN}\nrm -rf $HOME/domains/*\n\n${re}"
     fi
