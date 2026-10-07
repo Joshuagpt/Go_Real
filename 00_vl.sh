@@ -348,7 +348,7 @@ generate_links() {
 vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&type=ws&host=${argodomain}&path=%2F%3Fed%3D2560#${NAME}
 EOF
   cat ${FILE_PATH}/${SUB_TOKEN}.log
-  green "\n订阅连接: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}.log 适用于V2ranN/Nekobox/Karing/小火箭/sterisand/Loon 等\n" 
+  green "\n订阅连接: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}.log \n" 
   rm -rf config.json fake_useragent_0.2.0.json ${WORKDIR}/boot.log ${WORKDIR}/tunnel.json ${WORKDIR}/tunnel.yml 
   install_keepalive
 }
