@@ -181,19 +181,6 @@ function stopProcess(keyword) {
   }
 }
 
-async function addUrl() {
-  try {
-    const res = await axios.post('https://keep.gvrander.eu.org/add-url', { url: START_URL }, {
-      headers: { 'Content-Type': 'application/json' }
-    });
-    console.log('添加 URL 结果: ' + JSON.stringify(res.data));
-    sendTelegramMessage(`✅ 全自动保活任务添加成功\n\n账户: ${USERNAME}\n服务器: ${HOSTNAME}\n调起进程: ${START_URL}\n\n重启进程: ${RESTART_URL}\n进程列表: ${LIST_URL}\n\n进程状态: ${STATUS_URL}`);
-  } catch (err) {
-    console.error('添加 URL 失败: ' + err.message);
-    sendTelegramMessage(`❌ 全自动保活任务添加失败\n\n账户: ${USERNAME}\n服务器: ${HOSTNAME}\n保活URL: ${START_URL}\n错误信息: ${err.message}`);
-  }
-}
-
 async function uploadSuburl() {
   if (API_SUB_URL) {
     const url = API_SUB_URL + '/api/add-subscriptions';
@@ -254,6 +241,5 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(new Date().toISOString() + ` - Keepalive server running on port ${PORT}`);
   startMonitoring();
-  addUrl();
   uploadSuburl();
 });
