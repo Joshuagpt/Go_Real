@@ -116,7 +116,14 @@ else
     echo "Unsupported architecture: $ARCH"
     exit 1
 fi
-FILE_INFO=("$BASE_URL/web web" "$BASE_URL/server bot")
+
+MY_REPO="https://github.com/Joshuagpt/cloudflared-freebsd/releases/download/2026.10.4"
+case "$ARCH" in
+  arm|arm64|aarch64) BOT_URL="$MY_REPO/cloudflared-freebsd-arm64" ;;
+  *) BOT_URL="$MY_REPO/cloudflared-freebsd-amd64" ;;
+esac
+FILE_INFO=("$BASE_URL/web web" "$BOT_URL bot")
+
 if [ -n "$NEZHA_PORT" ]; then
     FILE_INFO+=("$BASE_URL/npm npm")
 else
