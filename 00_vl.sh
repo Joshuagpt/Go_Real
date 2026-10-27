@@ -267,6 +267,7 @@ elif [ -n "$NEZHA_SERVER" ] && [ -n "$NEZHA_KEY" ]; then
 else
     purple "NEZHA variable is empty, skipping running"
 fi
+"./$(basename ${FILE_MAP[bot]})" --version
 for key in "${!FILE_MAP[@]}"; do
     if [ -e "$(basename ${FILE_MAP[$key]})" ]; then
         rm -rf "$(basename ${FILE_MAP[$key]})" >/dev/null 2>&1
