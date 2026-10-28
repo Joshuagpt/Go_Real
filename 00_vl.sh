@@ -22,8 +22,9 @@ export ARGO_AUTH=${ARGO_AUTH:-''}
 export CFIP=${CFIP:-'ali.ztyawc.de'}      
 export CFPORT=${CFPORT:-'443'}               
 export SUB_TOKEN=${SUB_TOKEN:-${UUID:0:8}}
-export CHAT_ID=${CHAT_ID:-''} 
-export BOT_TOKEN=${BOT_TOKEN:-''} 
+# 兼容保活 .env 里的 TELEGRAM_* 变量名，避免经保活重启后 Telegram 配置被清空
+export CHAT_ID=${CHAT_ID:-${TELEGRAM_CHAT_ID:-''}}
+export BOT_TOKEN=${BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-''}}
 export UPLOAD_URL=${UPLOAD_URL:-''}
 
 if [[ "$HOSTNAME" =~ ct8 ]]; then
@@ -366,5 +367,11 @@ EOF
   green "\n订阅连接: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}.log \n" 
   rm -rf config.json fake_useragent_0.2.0.json ${WORKDIR}/boot.log ${WORKDIR}/tunnel.json ${WORKDIR}/tunnel.yml 
   install_keepalive
+  # 部署完成后发送 Telegram 通知（已配置 CHAT_ID 和 BOT_TOKEN 时）
+  if [[ -n "$CHAT_ID" && -n "$BOT_TOKEN" ]]; then
+    curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+      -d chat_id="${CHAT_ID}" \
+      --data-urlencode text="✅ ${NAME} 服务已重新部署完成" >/dev/null 2>&1
+  fi
 }
 generate_links
