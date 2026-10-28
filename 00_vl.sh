@@ -117,7 +117,8 @@ else
     exit 1
 fi
 
-MY_REPO="https://github.com/Joshuagpt/cloudflared-freebsd/releases/download/2026.10.4"
+# cloudflared 使用自己编译的版本，始终取 Releases 中标记为 Latest 的那一个
+MY_REPO="https://github.com/Joshuagpt/cloudflared-freebsd/releases/latest/download"
 case "$ARCH" in
   arm|arm64|aarch64) BOT_URL="$MY_REPO/cloudflared-freebsd-arm64" ;;
   *) BOT_URL="$MY_REPO/cloudflared-freebsd-amd64" ;;
@@ -176,6 +177,12 @@ for entry in "${FILE_INFO[@]}"; do
     FILE_MAP[$(echo "$entry" | cut -d ' ' -f 2)]="$NEW_FILENAME"
 done
 wait
+
+# 校验 cloudflared：文件必须存在、非空且能输出版本号，否则直接退出
+if [ ! -s "$(basename ${FILE_MAP[bot]})" ] || ! "./$(basename ${FILE_MAP[bot]})" --version >/dev/null 2>&1; then
+    red "cloudflared 下载或运行失败，请检查: $BOT_URL"
+    exit 1
+fi
 
 generate_config() {
   
