@@ -124,7 +124,13 @@ case "$ARCH" in
   arm|arm64|aarch64) BOT_URL="$MY_REPO/cloudflared-freebsd-arm64" ;;
   *) BOT_URL="$MY_REPO/cloudflared-freebsd-amd64" ;;
 esac
-FILE_INFO=("$BASE_URL/web web" "$BOT_URL bot")
+# xray 使用自己编译的版本，始终取 Releases 中标记为 Latest 的那一个
+XRAY_REPO="https://github.com/Joshuagpt/xray-freebsd/releases/latest/download"
+case "$ARCH" in
+  arm|arm64|aarch64) XRAY_ASSET="xray-freebsd-arm64" ;;
+  *) XRAY_ASSET="xray-freebsd-amd64" ;;
+esac
+FILE_INFO=("$XRAY_REPO/$XRAY_ASSET web" "$BOT_URL bot")
 
 if [ -n "$NEZHA_PORT" ]; then
     FILE_INFO+=("$BASE_URL/npm npm")
@@ -171,13 +177,46 @@ for entry in "${FILE_INFO[@]}"; do
     if [ -e "$NEW_FILENAME" ]; then
         green "$NEW_FILENAME already exists, Skipping download"
     else
-        curl -L -sS -o "$NEW_FILENAME" "$URL"
-        green "Downloading $NEW_FILENAME"
+        if curl -fL -sS -o "$NEW_FILENAME" "$URL"; then
+            green "Downloading $NEW_FILENAME"
+        else
+            KEY=$(echo "$entry" | cut -d ' ' -f 2)
+            rm -f "$NEW_FILENAME"
+            if [ "$KEY" = "web" ] || [ "$KEY" = "bot" ]; then
+                red "下载失败: $URL"
+                exit 1
+            fi
+            yellow "下载失败(已跳过): $URL"
+            continue
+        fi
     fi
     chmod +x "$NEW_FILENAME"
     FILE_MAP[$(echo "$entry" | cut -d ' ' -f 2)]="$NEW_FILENAME"
 done
 wait
+
+# 校验 xray：sha256 必须与 Releases 中的 SHA256SUMS 一致，且能输出版本号，否则直接退出
+WEB_BIN="$(basename ${FILE_MAP[web]})"
+if ! curl -fL -sS -o SHA256SUMS "$XRAY_REPO/SHA256SUMS"; then
+    red "SHA256SUMS 下载失败: $XRAY_REPO/SHA256SUMS"
+    exit 1
+fi
+WANT_SUM=$(awk -v f="$XRAY_ASSET" '$2==f {print $1}' SHA256SUMS)
+if command -v sha256sum >/dev/null 2>&1; then
+    GOT_SUM=$(sha256sum "$WEB_BIN" | awk '{print $1}')
+else
+    GOT_SUM=$(sha256 -q "$WEB_BIN")
+fi
+rm -f SHA256SUMS
+if [ -z "$WANT_SUM" ] || [ "$WANT_SUM" != "$GOT_SUM" ]; then
+    red "xray 校验失败 (期望: ${WANT_SUM:-空}, 实际: ${GOT_SUM:-空})"
+    exit 1
+fi
+if ! "./$WEB_BIN" version >/dev/null 2>&1; then
+    red "xray 无法运行，请检查: $XRAY_REPO/$XRAY_ASSET"
+    exit 1
+fi
+green "$("./$WEB_BIN" version | head -n 1)"
 
 # 校验 cloudflared：文件必须存在、非空且能输出版本号，否则直接退出
 if [ ! -s "$(basename ${FILE_MAP[bot]})" ] || ! "./$(basename ${FILE_MAP[bot]})" --version >/dev/null 2>&1; then
@@ -239,9 +278,9 @@ generate_config
 wait
 
 if [ -e "$(basename ${FILE_MAP[web]})" ]; then
-    nohup ./"$(basename ${FILE_MAP[web]})" -c config.json >/dev/null 2>&1 &
+    nohup ./"$(basename ${FILE_MAP[web]})" run -c config.json >/dev/null 2>&1 &
     sleep 2
-    pgrep -x "$(basename ${FILE_MAP[web]})" > /dev/null && green "$(basename ${FILE_MAP[web]}) is running" || { red "$(basename ${FILE_MAP[web]}) is not running, restarting..."; pkill -x "$(basename ${FILE_MAP[web]})" && nohup ./"$(basename ${FILE_MAP[web]})" -c config.json >/dev/null 2>&1 & sleep 2; purple "$(basename ${FILE_MAP[web]}) restarted"; }
+    pgrep -x "$(basename ${FILE_MAP[web]})" > /dev/null && green "$(basename ${FILE_MAP[web]}) is running" || { red "$(basename ${FILE_MAP[web]}) is not running, restarting..."; pkill -x "$(basename ${FILE_MAP[web]})" && nohup ./"$(basename ${FILE_MAP[web]})" run -c config.json >/dev/null 2>&1 & sleep 2; purple "$(basename ${FILE_MAP[web]}) restarted"; }
 fi
 
 if [ -e "$(basename ${FILE_MAP[bot]})" ]; then
