@@ -37,19 +37,6 @@ const services = [
   { name: 'argo', match: /tunnel --edge-ip-version/ }
 ];
 
-if (process.env.NEZHA_SERVER && process.env.NEZHA_PORT && process.env.NEZHA_KEY) {
-  services.push({ name: 'nezha', match: /-s .+:\d+ -p .+/ });
-  console.log(new Date().toISOString() + ' - Nezha 服务已启用。');
-} else if (process.env.NEZHA_SERVER && process.env.NEZHA_KEY) {
-  services.push({
-    name: 'nezha',
-    match: `-c ${os.homedir()}/domains/${USERNAME}.${CURRENT_DOMAIN}/logs/config.yaml`
-  });
-  console.log(new Date().toISOString() + ' - Nezha 服务已启用（使用配置文件模式）。');
-} else {
-  console.log(new Date().toISOString() + ' - Nezha 服务未启用，缺少必要的环境变量。');
-}
-
 function isProcessRunning(match) {
   try {
     const output = execSync('ps aux').toString();
