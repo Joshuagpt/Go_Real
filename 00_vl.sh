@@ -14,9 +14,6 @@ export LC_ALL=C
 HOSTNAME=$(hostname)
 USERNAME=$(whoami | tr '[:upper:]' '[:lower:]')
 export UUID=${UUID:-$(echo -n "$USERNAME+$HOSTNAME" | md5sum | head -c 32 | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')}
-export NEZHA_SERVER=${NEZHA_SERVER:-''}   
-export NEZHA_PORT=${NEZHA_PORT:-''}    
-export NEZHA_KEY=${NEZHA_KEY:-''}           
 export ARGO_DOMAIN=${ARGO_DOMAIN:-''}       
 export ARGO_AUTH=${ARGO_AUTH:-''}           
 export CFIP=${CFIP:-'ali.ztyawc.de'}      
@@ -109,14 +106,6 @@ argo_configure
 wait
 
 ARCH=$(uname -m) && DOWNLOAD_DIR="." && mkdir -p "$DOWNLOAD_DIR" && FILE_INFO=()
-if [ "$ARCH" == "arm" ] || [ "$ARCH" == "arm64" ] || [ "$ARCH" == "aarch64" ]; then
-    BASE_URL="https://github.com/eooce/test/releases/download/freebsd-arm64"
-elif [ "$ARCH" == "amd64" ] || [ "$ARCH" == "x86_64" ] || [ "$ARCH" == "x86" ]; then
-    BASE_URL="https://github.com/eooce/test/releases/download/freebsd"
-else
-    echo "Unsupported architecture: $ARCH"
-    exit 1
-fi
 
 # cloudflared 使用自己编译的版本，始终取 Releases 中标记为 Latest 的那一个
 MY_REPO="https://github.com/Joshuagpt/cloudflared-freebsd/releases/latest/download"
@@ -132,33 +121,6 @@ case "$ARCH" in
 esac
 FILE_INFO=("$XRAY_REPO/$XRAY_ASSET web" "$BOT_URL bot")
 
-if [ -n "$NEZHA_PORT" ]; then
-    FILE_INFO+=("$BASE_URL/npm npm")
-else
-    FILE_INFO+=("$BASE_URL/v1 php")
-    NEZHA_TLS=$(case "${NEZHA_SERVER##*:}" in 443|8443|2096|2087|2083|2053) echo -n tls;; *) echo -n false;; esac)
-    cat > "${WORKDIR}/config.yaml" << EOF
-client_secret: ${NEZHA_KEY}
-debug: false
-disable_auto_update: true
-disable_command_execute: false
-disable_force_update: true
-disable_nat: false
-disable_send_query: false
-gpu: false
-insecure_tls: false
-ip_report_period: 1800
-report_delay: 1
-server: ${NEZHA_SERVER}
-skip_connection_count: false
-skip_procs_count: false
-temperature: false
-tls: ${NEZHA_TLS}
-use_gitee_to_upgrade: false
-use_ipv6_country_code: false
-uuid: ${UUID}
-EOF
-fi
 declare -A FILE_MAP
 generate_random_name() {
     local chars=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890
@@ -182,12 +144,8 @@ for entry in "${FILE_INFO[@]}"; do
         else
             KEY=$(echo "$entry" | cut -d ' ' -f 2)
             rm -f "$NEW_FILENAME"
-            if [ "$KEY" = "web" ] || [ "$KEY" = "bot" ]; then
-                red "下载失败: $URL"
-                exit 1
-            fi
-            yellow "下载失败(已跳过): $URL"
-            continue
+            red "下载失败: $URL"
+            exit 1
         fi
     fi
     chmod +x "$NEW_FILENAME"
@@ -296,24 +254,6 @@ if [ -e "$(basename ${FILE_MAP[bot]})" ]; then
     pgrep -x "$(basename ${FILE_MAP[bot]})" > /dev/null && green "$(basename ${FILE_MAP[bot]}) is running" || { red "$(basename ${FILE_MAP[bot]}) is not running, restarting..."; pkill -x "$(basename ${FILE_MAP[bot]})" && nohup ./"$(basename ${FILE_MAP[bot]})" $args >/dev/null 2>&1 & sleep 2; purple "$(basename ${FILE_MAP[bot]}) restarted"; }
 fi
 
-if [ -n "$NEZHA_SERVER" ] && [ -n "$NEZHA_PORT" ] && [ -n "$NEZHA_KEY" ]; then
-    if [ -e "$(basename ${FILE_MAP[npm]})" ]; then
-    tlsPorts=("443" "8443" "2096" "2087" "2083" "2053")
-      [[ "${tlsPorts[*]}" =~ "${NEZHA_PORT}" ]] && NEZHA_TLS="--tls" || NEZHA_TLS=""
-      export TMPDIR=$(pwd)
-      nohup ./"$(basename ${FILE_MAP[npm]})" -s ${NEZHA_SERVER}:${NEZHA_PORT} -p ${NEZHA_KEY} ${NEZHA_TLS} >/dev/null 2>&1 &
-      sleep 2
-      pgrep -x "$(basename ${FILE_MAP[npm]})" > /dev/null && green "$(basename ${FILE_MAP[npm]}) is running" || { red "$(basename ${FILE_MAP[npm]}) is not running, restarting..."; pkill -f "$(basename ${FILE_MAP[npm]})" && nohup ./"$(basename ${FILE_MAP[npm]})" -s ${NEZHA_SERVER}:${NEZHA_PORT} -p ${NEZHA_KEY} ${NEZHA_TLS} >/dev/null 2>&1 & sleep 2; purple "$(basename ${FILE_MAP[npm]}) restarted"; }
-    fi
-elif [ -n "$NEZHA_SERVER" ] && [ -n "$NEZHA_KEY" ]; then
-    if [ -e "$(basename ${FILE_MAP[php]})" ]; then
-      nohup ./"$(basename ${FILE_MAP[php]})" -c "${WORKDIR}/config.yaml" >/dev/null 2>&1 &
-      sleep 2
-      pgrep -x "$(basename ${FILE_MAP[php]})" > /dev/null && green "$(basename ${FILE_MAP[php]}) is running\e[0m" || { red "$(basename ${FILE_MAP[php]}) is not running, restarting..."; pkill -x "$(basename ${FILE_MAP[php]})" && nohup ./"$(basename ${FILE_MAP[php]})" -s -c "${WORKDIR}/config.yaml" >/dev/null 2>&1 & sleep 2; purple "$(basename ${FILE_MAP[php]}) restarted"; }
-    fi
-else
-    purple "NEZHA variable is empty, skipping running"
-fi
 "./$(basename ${FILE_MAP[bot]})" --version
 for key in "${!FILE_MAP[@]}"; do
     if [ -e "$(basename ${FILE_MAP[$key]})" ]; then
@@ -357,14 +297,11 @@ SUB_TOKEN=${SUB_TOKEN}
 UPLOAD_URL=${UPLOAD_URL}
 TELEGRAM_CHAT_ID=${CHAT_ID}
 TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
-NEZHA_SERVER=${NEZHA_SERVER}
-NEZHA_PORT=${NEZHA_PORT}
-NEZHA_KEY=${NEZHA_KEY}
 ARGO_DOMAIN=${ARGO_DOMAIN}
 ARGO_AUTH=$([[ -z "$ARGO_AUTH" ]] && echo "" || ([[ "$ARGO_AUTH" =~ ^\{.* ]] && echo "'$ARGO_AUTH'" || echo "$ARGO_AUTH"))
 EOF
     devil www add ${USERNAME}.${CURRENT_DOMAIN} php > /dev/null 2>&1
-    index_url="https://github.com/eooce/Sing-box/releases/download/00/index.html"
+    index_url="https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/index.html"
     [ -f "${FILE_PATH}/index.html" ] || $COMMAND "${FILE_PATH}/index.html" "$index_url"
     ln -fs /usr/local/bin/node18 ~/bin/node > /dev/null 2>&1
     ln -fs /usr/local/bin/npm18 ~/bin/npm > /dev/null 2>&1
