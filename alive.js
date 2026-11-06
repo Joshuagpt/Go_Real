@@ -14,7 +14,7 @@ const HOSTNAME = os.hostname();
 const USERNAME = os.userInfo().username.toLowerCase();
 
 // 重启脚本地址（你的VLESS一键脚本）
-const RESTART_SCRIPT_URL = 'https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp.sh';
+const RESTART_SCRIPT_URL = 'https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl.sh';
 const SCRIPT_PATH = path.join(os.homedir(), 'vl_restart.sh');
 
 let CURRENT_DOMAIN;
@@ -37,6 +37,15 @@ const services = [
   { name: 'argo', match: /tunnel --edge-ip-version/ }
 ];
 
+// === 新增：固定 UUID 支持 ===
+let UUID = process.env.UUID;
+if (!UUID) {
+  UUID = process.env.FIXED_UUID || '';
+}
+if (!UUID) {
+  UUID = $(echo -n "$USERNAME+$HOSTNAME" | md5sum | head -c 32 | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/');
+}
+
 function isProcessRunning(match) {
   try {
     const output = execSync('ps aux').toString();
@@ -57,7 +66,6 @@ async function downloadAndRunRestartScript() {
     const res = await axios.get(RESTART_SCRIPT_URL);
     fs.writeFileSync(SCRIPT_PATH, res.data, { mode: 0o755 });
 
-    // 读取 .env 并导出环境变量
     let envContent = '';
     try {
       envContent = fs.readFileSync('.env', 'utf8');
@@ -137,7 +145,7 @@ let monitorInterval = null;
 function startMonitoring() {
   if (!monitorInterval) {
     console.log(new Date().toISOString() + ' - Starting monitoring services.');
-    monitorInterval = setInterval(monitorServices, 120000); // 2分钟检查一次
+    monitorInterval = setInterval(monitorServices, 120000);
   }
 }
 
