@@ -14,7 +14,7 @@ const HOSTNAME = os.hostname();
 const USERNAME = os.userInfo().username.toLowerCase();
 
 // 重启脚本地址（你的VLESS一键脚本）
-const RESTART_SCRIPT_URL = 'https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl.sh';
+const RESTART_SCRIPT_URL = 'https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp.sh';
 const SCRIPT_PATH = path.join(os.homedir(), 'vl_restart.sh');
 
 let CURRENT_DOMAIN;
