@@ -6,10 +6,10 @@ VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls ht
 
 > 
 
-<h2>▶ Reload&Refresh</h2>
+<h2>▶ http2</h2>
 
 ```bash
-VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh) re
+ARGO_PROTOCOL=http2 UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh) re
 ```
 
 > 
@@ -22,10 +22,10 @@ bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/sb_serv
 
 > 
 
-<h2>▶ Reality</h2>
+<h2>▶ Xhttp</h2>
 
 ```bash
-REALITY_PORT="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh)
+UUID="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp.sh)
 ```
 
 >
