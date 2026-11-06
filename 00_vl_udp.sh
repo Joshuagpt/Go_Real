@@ -1,0 +1,375 @@
+#!/bin/bash
+
+re="\033[0m"
+red="\033[1;91m"
+green="\e[1;32m"
+yellow="\e[1;33m"
+purple="\e[1;35m"
+red() { echo -e "\e[1;91m$1\033[0m"; }
+green() { echo -e "\e[1;32m$1\033[0m"; }
+yellow() { echo -e "\e[1;33m$1\033[0m"; }
+purple() { echo -e "\e[1;35m$1\033[0m"; }
+reading() { read -p "$(red "$1")" "$2"; }
+export LC_ALL=C
+HOSTNAME=$(hostname)
+USERNAME=$(whoami | tr '[:upper:]' '[:lower:]')
+export UUID=${UUID:-$(echo -n "$USERNAME+$HOSTNAME" | md5sum | head -c 32 | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')}
+export ARGO_DOMAIN=${ARGO_DOMAIN:-''}       
+export ARGO_AUTH=${ARGO_AUTH:-''}           
+export CFIP=${CFIP:-'ali.ztyawc.de'}      
+export CFPORT=${CFPORT:-'443'}               
+export SUB_TOKEN=${SUB_TOKEN:-${UUID:0:8}}
+# 新增：Argo 隧道协议，默认 quic，可设置为 http2
+export ARGO_PROTOCOL=${ARGO_PROTOCOL:-'quic'}
+# 兼容保活 .env 里的 TELEGRAM_* 变量名，避免经保活重启后 Telegram 配置被清空
+export CHAT_ID=${CHAT_ID:-${TELEGRAM_CHAT_ID:-''}}
+export BOT_TOKEN=${BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-''}}
+export UPLOAD_URL=${UPLOAD_URL:-''}
+
+if [[ "$HOSTNAME" =~ ct8 ]]; then
+    CURRENT_DOMAIN="ct8.pl"
+elif [[ "$HOSTNAME" =~ hostuno ]]; then
+    CURRENT_DOMAIN="useruno.com"
+else
+    CURRENT_DOMAIN="serv00.net"
+fi
+WORKDIR="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/logs"
+FILE_PATH="${HOME}/domains/${USERNAME}.${CURRENT_DOMAIN}/public_html"
+rm -rf "$WORKDIR" "$FILE_PATH" && mkdir -p "$WORKDIR" "$FILE_PATH" && chmod 777 "$WORKDIR" "$FILE_PATH" >/dev/null 2>&1
+bash -c 'ps aux | grep $(whoami) | grep -v "sshd\|bash\|grep" | awk "{print \$2}" | xargs -r kill -9 >/dev/null 2>&1' >/dev/null 2>&1
+command -v curl &>/dev/null && COMMAND="curl -so" || command -v wget &>/dev/null && COMMAND="wget -qO" || { red "Error: neither curl nor wget found, please install one of them." >&2; exit 1; }
+
+# 生成随机 XHTTP 路径
+XHTTP_PATH=$(echo -n "${UUID}" | md5sum | head -c 16)
+
+check_port () {
+  clear
+  purple "正在安装中,请稍等..."
+  port_list=$(devil port list)
+  tcp_ports=$(echo "$port_list" | grep -c "tcp")
+  udp_ports=$(echo "$port_list" | grep -c "udp")
+
+  if [[ $tcp_ports -lt 1 ]]; then
+      red "没有可用的TCP端口,正在调整..."
+
+      if [[ $udp_ports -ge 3 ]]; then
+          udp_port_to_delete=$(echo "$port_list" | awk '/udp/ {print $1}' | head -n 1)
+          devil port del udp $udp_port_to_delete
+          green "已删除udp端口: $udp_port_to_delete"
+      fi
+
+      while true; do
+          tcp_port=$(shuf -i 10000-65535 -n 1)
+          result=$(devil port add tcp $tcp_port 2>&1)
+          if [[ $result == *"Ok"* ]]; then
+              green "已添加TCP端口: $tcp_port"
+              tcp_port1=$tcp_port
+              break
+          else
+              yellow "端口 $tcp_port 不可用，尝试其他端口..."
+          fi
+      done
+
+      green "端口已调整完成, 将断开SSH连接, 请重新连接SSH并重新执行脚本"
+      devil binexec on >/dev/null 2>&1
+      kill -9 $(ps -o ppid= -p $$) >/dev/null 2>&1
+  else
+      tcp_ports=$(echo "$port_list" | awk '/tcp/ {print $1}')
+      tcp_port1=$(echo "$tcp_ports" | sed -n '1p')
+  fi
+
+  export PORT=$tcp_port1
+  purple "使用tcp端口: $tcp_port1"
+}
+check_port
+
+argo_configure() {
+  if [[ -z $ARGO_AUTH || -z $ARGO_DOMAIN ]]; then
+    green "ARGO_DOMAIN or ARGO_AUTH is empty,use quick tunnel"
+    return
+  fi
+
+  if [[ $ARGO_AUTH =~ TunnelSecret ]]; then
+    echo $ARGO_AUTH > tunnel.json
+    cat > tunnel.yml << EOF
+tunnel: $(cut -d\" -f12 <<< "$ARGO_AUTH")
+credentials-file: tunnel.json
+protocol: ${ARGO_PROTOCOL}
+
+ingress:
+  - hostname: $ARGO_DOMAIN
+    service: http://localhost:$PORT
+    originRequest:
+      noTLSVerify: true
+  - service: http_status:404
+EOF
+  else
+    yellow "当前使用的是token,请在云flare后台设置隧道端口为${purple}${PORT}${re}"
+  fi
+}
+argo_configure
+wait
+
+ARCH=$(uname -m) && DOWNLOAD_DIR="." && mkdir -p "$DOWNLOAD_DIR" && FILE_INFO=()
+
+# cloudflared 使用自己编译的版本，始终取 Releases 中标记为 Latest 的那一个
+MY_REPO="https://github.com/Joshuagpt/cloudflared-freebsd/releases/latest/download"
+case "$ARCH" in
+  arm|arm64|aarch64) BOT_URL="$MY_REPO/cloudflared-freebsd-arm64" ;;
+  *) BOT_URL="$MY_REPO/cloudflared-freebsd-amd64" ;;
+esac
+# xray 使用自己编译的版本，始终取 Releases 中标记为 Latest 的那一个
+XRAY_REPO="https://github.com/Joshuagpt/xray-freebsd/releases/latest/download"
+case "$ARCH" in
+  arm|arm64|aarch64) XRAY_ASSET="xray-freebsd-arm64" ;;
+  *) XRAY_ASSET="xray-freebsd-amd64" ;;
+esac
+FILE_INFO=("$XRAY_REPO/$XRAY_ASSET web" "$BOT_URL bot")
+
+declare -A FILE_MAP
+generate_random_name() {
+    local chars=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890
+    local name=""
+    for i in {1..6}; do
+        name="$name${chars:RANDOM%${#chars}:1}"
+    done
+    echo "$name"
+}
+
+for entry in "${FILE_INFO[@]}"; do
+    URL=$(echo "$entry" | cut -d ' ' -f 1)
+    RANDOM_NAME=$(generate_random_name)
+    NEW_FILENAME="$DOWNLOAD_DIR/$RANDOM_NAME"
+    
+    if [ -e "$NEW_FILENAME" ]; then
+        green "$NEW_FILENAME already exists, Skipping download"
+    else
+        if curl -fL -sS -o "$NEW_FILENAME" "$URL"; then
+            green "Downloading $NEW_FILENAME"
+        else
+            KEY=$(echo "$entry" | cut -d ' ' -f 2)
+            rm -f "$NEW_FILENAME"
+            red "下载失败: $URL"
+            exit 1
+        fi
+    fi
+    chmod +x "$NEW_FILENAME"
+    FILE_MAP[$(echo "$entry" | cut -d ' ' -f 2)]="$NEW_FILENAME"
+done
+wait
+
+# 校验 xray：sha256 必须与 Releases 中的 SHA256SUMS 一致，且能输出版本号，否则直接退出
+WEB_BIN="$(basename ${FILE_MAP[web]})"
+if ! curl -fL -sS -o SHA256SUMS "$XRAY_REPO/SHA256SUMS"; then
+    red "SHA256SUMS 下载失败: $XRAY_REPO/SHA256SUMS"
+    exit 1
+fi
+WANT_SUM=$(awk -v f="$XRAY_ASSET" '$2==f {print $1}' SHA256SUMS)
+if command -v sha256sum >/dev/null 2>&1; then
+    GOT_SUM=$(sha256sum "$WEB_BIN" | awk '{print $1}')
+else
+    GOT_SUM=$(sha256 -q "$WEB_BIN")
+fi
+rm -f SHA256SUMS
+if [ -z "$WANT_SUM" ] || [ "$WANT_SUM" != "$GOT_SUM" ]; then
+    red "xray 校验失败 (期望: ${WANT_SUM:-空}, 实际: ${GOT_SUM:-空})"
+    exit 1
+fi
+if ! "./$WEB_BIN" version >/dev/null 2>&1; then
+    red "xray 无法运行，请检查: $XRAY_REPO/$XRAY_ASSET"
+    exit 1
+fi
+green "$("./$WEB_BIN" version | head -n 1)"
+
+# 校验 cloudflared：文件必须存在、非空且能输出版本号，否则直接退出
+if [ ! -s "$(basename ${FILE_MAP[bot]})" ] || ! "./$(basename ${FILE_MAP[bot]})" --version >/dev/null 2>&1; then
+    red "cloudflared 下载或运行失败，请检查: $BOT_URL"
+    exit 1
+fi
+
+generate_config() {
+  
+  cat > config.json << EOF
+{
+    "log":{
+        "access":"/dev/null",
+        "error":"/dev/null",
+        "loglevel":"none"
+    },
+    "inbounds":[
+        {
+          "tag":"xhttp-in",
+          "port": ${PORT},
+          "listen": "127.0.0.1",
+          "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "${UUID}",
+                        "flow": ""
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "xhttp",
+                "xhttpSettings": {
+                    "path": "/${XHTTP_PATH}",
+                    "mode": "auto"
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls", "quic"],
+                "metadataOnly": false
+            }
+        }
+    ],
+    "dns":{
+        "servers":[
+            "https+local://8.8.8.8/dns-query"
+        ]
+    },
+    "outbounds": [
+        {
+          "protocol": "freedom",
+          "tag": "direct"
+          },
+        {
+          "protocol": "blackhole",
+          "tag": "blocked"
+        }
+    ] 
+}
+EOF
+}
+generate_config
+wait
+
+if [ -e "$(basename ${FILE_MAP[web]})" ]; then
+    nohup ./"$(basename ${FILE_MAP[web]})" run -c config.json >/dev/null 2>&1 &
+    sleep 2
+    pgrep -x "$(basename ${FILE_MAP[web]})" > /dev/null && green "$(basename ${FILE_MAP[web]}) is running" || { red "$(basename ${FILE_MAP[web]}) is not running, restarting..."; pkill -x "$(basename ${FILE_MAP[web]})" && nohup ./"$(basename ${FILE_MAP[web]})" run -c config.json >/dev/null 2>&1 & sleep 2; purple "$(basename ${FILE_MAP[web]}) restarted"; }
+fi
+
+if [ -e "$(basename ${FILE_MAP[bot]})" ]; then
+    if [[ $ARGO_AUTH =~ ^[A-Z0-9a-z=]{120,250}$ ]]; then
+      args="tunnel --edge-ip-version auto --no-autoupdate --protocol ${ARGO_PROTOCOL} run --token ${ARGO_AUTH}"
+    elif [[ $ARGO_AUTH =~ TunnelSecret ]]; then
+      args="tunnel --edge-ip-version auto --config tunnel.yml run"
+    else
+      args="tunnel --edge-ip-version auto --no-autoupdate --protocol ${ARGO_PROTOCOL} --logfile ${WORKDIR}/boot.log --loglevel info --url http://localhost:$PORT"
+    fi
+    nohup ./"$(basename ${FILE_MAP[bot]})" $args >/dev/null 2>&1 &
+    sleep 2
+    pgrep -x "$(basename ${FILE_MAP[bot]})" > /dev/null && green "$(basename ${FILE_MAP[bot]}) is running" || { red "$(basename ${FILE_MAP[bot]}) is not running, restarting..."; pkill -x "$(basename ${FILE_MAP[bot]})" && nohup ./"$(basename ${FILE_MAP[bot]})" $args >/dev/null 2>&1 & sleep 2; purple "$(basename ${FILE_MAP[bot]}) restarted"; }
+fi
+
+"./$(basename ${FILE_MAP[bot]})" --version
+for key in "${!FILE_MAP[@]}"; do
+    if [ -e "$(basename ${FILE_MAP[$key]})" ]; then
+        rm -rf "$(basename ${FILE_MAP[$key]})" >/dev/null 2>&1
+    fi
+done
+
+get_argodomain() {
+  if [[ -n $ARGO_AUTH ]]; then
+    echo "$ARGO_DOMAIN"
+  else
+    local retry=0
+    local max_retries=6
+    local argodomain=""
+    while [[ $retry -lt $max_retries ]]; do
+      ((retry++))
+      argodomain=$(grep -oE 'https://[[:alnum:]+\.-]+\.trycloudflare\.com' "${WORKDIR}/boot.log" | sed 's@https://@@') 
+      if [[ -n $argodomain ]]; then
+        break
+      fi
+      sleep 1
+    done
+    echo "$argodomain"
+  fi
+}
+
+install_keepalive () {
+    purple "正在安装保活服务中,请稍等......"
+    devil www del keep.${USERNAME}.${CURRENT_DOMAIN} > /dev/null 2>&1
+    devil www add keep.${USERNAME}.${CURRENT_DOMAIN} nodejs /usr/local/bin/node18 > /dev/null 2>&1
+    keep_path="$HOME/domains/keep.${USERNAME}.${CURRENT_DOMAIN}/public_nodejs"
+    [ -d "$keep_path" ] || mkdir -p "$keep_path"
+    app_file_url="https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/alive.js"
+    $COMMAND "${keep_path}/app.js" "$app_file_url"
+    
+    cat > ${keep_path}/.env <<EOF
+UUID=${UUID}
+CFIP=${CFIP}
+CFPORT=${CFPORT}
+SUB_TOKEN=${SUB_TOKEN}
+UPLOAD_URL=${UPLOAD_URL}
+TELEGRAM_CHAT_ID=${CHAT_ID}
+TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
+ARGO_DOMAIN=${ARGO_DOMAIN}
+ARGO_AUTH=$([[ -z "$ARGO_AUTH" ]] && echo "" || ([[ "$ARGO_AUTH" =~ ^\{.* ]] && echo "'$ARGO_AUTH'" || echo "$ARGO_AUTH"))
+ARGO_PROTOCOL=${ARGO_PROTOCOL}
+XHTTP_PATH=${XHTTP_PATH}
+EOF
+    devil www add ${USERNAME}.${CURRENT_DOMAIN} php > /dev/null 2>&1
+    index_url="https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/index.html"
+    [ -f "${FILE_PATH}/index.html" ] || $COMMAND "${FILE_PATH}/index.html" "$index_url"
+    ln -fs /usr/local/bin/node18 ~/bin/node > /dev/null 2>&1
+    ln -fs /usr/local/bin/npm18 ~/bin/npm > /dev/null 2>&1
+    mkdir -p ~/.npm-global
+    npm config set prefix '~/.npm-global'
+    echo 'export PATH=~/.npm-global/bin:~/bin:$PATH' >> $HOME/.bash_profile && source $HOME/.bash_profile
+    rm -rf $HOME/.npmrc > /dev/null 2>&1
+    cd ${keep_path} && npm install dotenv axios --silent > /dev/null 2>&1
+    rm $HOME/domains/keep.${USERNAME}.${CURRENT_DOMAIN}/public_nodejs/public/index.html > /dev/null 2>&1
+    devil www restart keep.${USERNAME}.${CURRENT_DOMAIN} > /dev/null 2>&1
+    if curl -skL "http://keep.${USERNAME}.${CURRENT_DOMAIN}/${USERNAME}" | grep -q "running"; then
+        green "\n全自动保活服务安装成功\n"
+	      green "所有服务都运行正常,全自动保活任务添加成功\n\n"
+        purple "访问 http://keep.${USERNAME}.${CURRENT_DOMAIN}/stop 结束进程\n"
+        purple "访问 http://keep.${USERNAME}.${CURRENT_DOMAIN}/list 全部进程列表\n"
+        yellow "访问 http://keep.${USERNAME}.${CURRENT_DOMAIN}/${USERNAME} 调起保活程序   备用保活路径: /run  /go  /start\n"
+        purple "访问 http://keep.${USERNAME}.${CURRENT_DOMAIN}/status 查看进程状态\n\n"
+        if [[ -n "$CHAT_ID" && -n "$BOT_TOKEN" ]]; then
+            green "Telegram 通知已生效（CHAT_ID: ${CHAT_ID}）\n\n"
+        else
+            purple "如需开启 Telegram 通知，请在脚本中添加以下变量后重新运行：\n"
+            yellow "CHAT_ID 和 BOT_TOKEN\n"
+        fi
+    else
+        red "\n全自动保活服务安装失败,存在未运行的进程\n访问 ${yellow}http://keep.${USERNAME}.${CURRENT_DOMAIN}/status ${red}检查,建议执行以下命令后重装: \n\ndevil www del ${USERNAME}.${CURRENT_DOMAIN}\ndevil www del keep.${USERNAME}.${CURRENT_DOMAIN}\nrm -rf $HOME/domains/*\n\n${re}"
+    fi
+}
+
+generate_links() {
+  argodomain=$(get_argodomain)
+  echo -e "\e[1;32mArgoDomain: \e[1;35m${argodomain}\e[0m"
+  echo -e "\e[1;32mArgo Protocol: \e[1;35m${ARGO_PROTOCOL}\e[0m"
+  echo -e "\e[1;32mXHTTP Path: \e[1;35m/${XHTTP_PATH}\e[0m\n"
+  sleep 1
+  get_name() { if [ "$HOSTNAME" = "s1.ct8.pl" ]; then SERVER="CT8"; else SERVER=$(echo "$HOSTNAME" | cut -d '.' -f 1); fi; echo "$SERVER"; }
+  NAME=$(get_name)-${USERNAME}
+
+  # 生成双节点：H2 + H3
+  cat > ${FILE_PATH}/${SUB_TOKEN}.log <<EOF
+vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&fp=chrome&type=xhttp&host=${argodomain}&path=%2F${XHTTP_PATH}&mode=auto&alpn=h2#${NAME}-H2-Argo
+vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&fp=chrome&type=xhttp&host=${argodomain}&path=%2F${XHTTP_PATH}&mode=auto&alpn=h3#${NAME}-H3-Argo
+EOF
+
+  cat ${FILE_PATH}/${SUB_TOKEN}.log
+  green "\n订阅连接: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}.log \n" 
+  green "节点说明："
+  yellow "  1. H2-Argo  →  alpn=h2（兼容性更好）"
+  yellow "  2. H3-Argo  →  alpn=h3（配合 quic 隧道，更接近全 UDP）\n"
+  rm -rf config.json fake_useragent_0.2.0.json ${WORKDIR}/boot.log ${WORKDIR}/tunnel.json ${WORKDIR}/tunnel.yml 
+  install_keepalive
+  # 部署完成后发送 Telegram 通知（已配置 CHAT_ID 和 BOT_TOKEN 时）
+  if [[ -n "$CHAT_ID" && -n "$BOT_TOKEN" ]]; then
+    curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+      -d chat_id="${CHAT_ID}" \
+      --data-urlencode text="✅ ${NAME} XHTTP+Argo(${ARGO_PROTOCOL}) 服务已重新部署完成" >/dev/null 2>&1
+  fi
+}
+generate_links
