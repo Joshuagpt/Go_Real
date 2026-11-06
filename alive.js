@@ -1,20 +1,28 @@
 const http = require('http');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
 const axios = require('axios');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-require('dotenv').config();
+const dotenv = require('dotenv');
+
+const ENV_FILE = path.join(__dirname, '.env');
+dotenv.config({ path: ENV_FILE });
 
 const SUB_TOKEN = process.env.SUB_TOKEN;
+// 管理接口（/list /stop /restart）令牌：优先 ADMIN_TOKEN，未设置时沿用 SUB_TOKEN
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || SUB_TOKEN || '';
 const API_SUB_URL = process.env.UPLOAD_URL;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const HOSTNAME = os.hostname();
 const USERNAME = os.userInfo().username.toLowerCase();
 
-// 重启脚本地址（你的VLESS一键脚本）
-const RESTART_SCRIPT_URL = 'https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl.sh';
+// 重启脚本：保活的对象是 00_vl_xhttp.sh。可用环境变量 RESTART_SCRIPT_URL 覆盖（例如固定到某个 commit），
+// 并可用 RESTART_SCRIPT_SHA256 钉住内容，校验不一致则拒绝执行
+const RESTART_SCRIPT_URL = process.env.RESTART_SCRIPT_URL || 'https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp.sh';
+const RESTART_SCRIPT_SHA256 = (process.env.RESTART_SCRIPT_SHA256 || '').trim().toLowerCase();
 const SCRIPT_PATH = path.join(os.homedir(), 'vl_restart.sh');
 
 let CURRENT_DOMAIN;
@@ -37,15 +45,6 @@ const services = [
   { name: 'argo', match: /tunnel --edge-ip-version/ }
 ];
 
-// === 新增：固定 UUID 支持 ===
-let UUID = process.env.UUID;
-if (!UUID) {
-  UUID = process.env.FIXED_UUID || '';
-}
-if (!UUID) {
-  UUID = $(echo -n "$USERNAME+$HOSTNAME" | md5sum | head -c 32 | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/');
-}
-
 function isProcessRunning(match) {
   try {
     const output = execSync('ps aux').toString();
@@ -61,30 +60,57 @@ function isProcessRunning(match) {
   }
 }
 
-async function downloadAndRunRestartScript() {
-  try {
-    const res = await axios.get(RESTART_SCRIPT_URL);
-    fs.writeFileSync(SCRIPT_PATH, res.data, { mode: 0o755 });
+function isAuthorized(req, url) {
+  if (!ADMIN_TOKEN) return false;
+  const given = url.searchParams.get('token') || req.headers['x-admin-token'] || '';
+  const a = Buffer.from(String(given));
+  const b = Buffer.from(ADMIN_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
-    let envContent = '';
+// 防止定时检查与 HTTP 触发同时重启
+let restarting = false;
+
+async function downloadAndRunRestartScript() {
+  if (restarting) {
+    console.log(new Date().toISOString() + ' - Restart already in progress, skipping.');
+    return false;
+  }
+  restarting = true;
+  try {
+    const res = await axios.get(RESTART_SCRIPT_URL, { responseType: 'arraybuffer', timeout: 30000 });
+    const buf = Buffer.from(res.data);
+    if (buf.length < 200 || buf.slice(0, 2).toString() !== '#!') {
+      throw new Error('下载内容不是有效的 shell 脚本: ' + RESTART_SCRIPT_URL);
+    }
+    if (RESTART_SCRIPT_SHA256) {
+      const got = crypto.createHash('sha256').update(buf).digest('hex');
+      if (got !== RESTART_SCRIPT_SHA256) {
+        throw new Error(`重启脚本 SHA256 校验失败 (期望 ${RESTART_SCRIPT_SHA256}, 实际 ${got})`);
+      }
+    }
+    fs.writeFileSync(SCRIPT_PATH, buf, { mode: 0o700 });
+
+    // 重新读取 .env，保证拿到最新配置；以环境变量方式传给脚本，避免拼接 shell 命令
+    let envVars = {};
     try {
-      envContent = fs.readFileSync('.env', 'utf8');
+      envVars = dotenv.parse(fs.readFileSync(ENV_FILE, 'utf8'));
     } catch (e) {}
 
-    const exportCmds = envContent
-      .split('\n')
-      .filter(line => line.trim() && !line.startsWith('#'))
-      .map(line => `export ${line}`)
-      .join(' && ');
-
     console.log(new Date().toISOString() + ' - Running restart script for all services.');
-    execSync(`${exportCmds} && bash ${SCRIPT_PATH}`, { stdio: 'inherit' });
-    fs.unlinkSync(SCRIPT_PATH);
+    execSync(`bash ${SCRIPT_PATH}`, {
+      stdio: 'inherit',
+      // KEEPALIVE_RESTART=1 告知脚本：由保活进程触发，不要杀掉或重装保活服务自身
+      env: { ...process.env, ...envVars, KEEPALIVE_RESTART: '1' }
+    });
     return true;
   } catch (err) {
     console.error(new Date().toISOString() + ' - Failed to run restart script: ' + err.message);
     await sendTelegramMessage(`❌ 重启脚本执行失败\n\n账户: ${USERNAME}\n服务器: ${HOSTNAME}\n错误详情: ${err.message}`);
     return false;
+  } finally {
+    try { fs.unlinkSync(SCRIPT_PATH); } catch (e) {}
+    restarting = false;
   }
 }
 
@@ -108,6 +134,7 @@ async function sendTelegramMessage(text) {
 }
 
 async function monitorServices() {
+  if (restarting) return;
   let allRunning = true;
   for (const svc of services) {
     if (!isProcessRunning(svc.match)) {
@@ -151,7 +178,8 @@ function startMonitoring() {
 
 function getProcessList() {
   try {
-    return execSync('ps aux').toString();
+    // 进程命令行里可能带 cloudflared 的 --token，输出前打码
+    return execSync('ps aux').toString().replace(/(--token\s+)\S+/g, '$1***');
   } catch (err) {
     console.error(new Date().toISOString() + ' - Failed to get process list: ' + err.message);
     return null;
@@ -187,11 +215,28 @@ async function uploadSuburl() {
 }
 
 const server = http.createServer(async (req, res) => {
-  if (req.url === '/') {
+  let url;
+  try {
+    url = new URL(req.url, 'http://localhost');
+  } catch (e) {
+    res.writeHead(400);
+    res.end('Bad Request');
+    return;
+  }
+  const pathname = url.pathname;
+
+  // 需要鉴权的管理接口
+  if (['/stop', '/list', '/restart'].includes(pathname) && !isAuthorized(req, url)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Forbidden');
+    return;
+  }
+
+  if (pathname === '/') {
     startMonitoring();
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Hello world!\n');
-  } else if (['/run', `/${USERNAME}`, '/go', '/start'].includes(req.url)) {
+  } else if (['/run', `/${USERNAME}`, '/go', '/start'].includes(pathname)) {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     let allRunning = true;
     for (const svc of services) {
@@ -206,23 +251,23 @@ const server = http.createServer(async (req, res) => {
       res.end(`正在启动进程中,访问 http://keep.${USERNAME}.${CURRENT_DOMAIN}/${USERNAME}`);
       await downloadAndRunRestartScript();
     }
-  } else if (req.url === '/stop') {
+  } else if (pathname === '/stop') {
     stopProcess('config.json');
     stopProcess('tunnel --edge-ip-version');
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('所有相关进程已停止');
-  } else if (req.url === '/list') {
+  } else if (pathname === '/list') {
     const list = getProcessList();
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end(list || 'Failed to get process list.');
-  } else if (req.url === '/status') {
+  } else if (pathname === '/status') {
     let status = {};
     for (const svc of services) {
       status[svc.name] = isProcessRunning(svc.match) ? 'running' : 'stopped';
     }
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(status, null, 2));
-  } else if (req.url === '/restart') {
+  } else if (pathname === '/restart') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end(`服务重启成功,20秒后访问并刷新 http://keep.${USERNAME}.${CURRENT_DOMAIN}/status 查看进程是否都是running状态`);
     await downloadAndRunRestartScript();
