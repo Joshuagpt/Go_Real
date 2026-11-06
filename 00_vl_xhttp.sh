@@ -51,8 +51,8 @@ export RESTART_SCRIPT_URL=${RESTART_SCRIPT_URL:-'https://raw.githubusercontent.c
 # 可选：填写重启脚本的 SHA256，保活重启时校验不一致则拒绝执行
 export RESTART_SCRIPT_SHA256=${RESTART_SCRIPT_SHA256:-''}
 
-# === Path 固定（取 UUID 第 9-24 个字符；标准 UUID 格式下首尾为连字符，32 位无连字符格式下为 16 位十六进制）===
-XHTTP_PATH=$(echo -n "$UUID" | cut -c 9-24)
+# === Path 固定：先去掉 UUID 中的连字符，再取第 9-24 位，得到 16 位十六进制（标准 UUID 与 32 位无连字符格式结果一致）===
+XHTTP_PATH=$(echo -n "$UUID" | tr -d '-' | cut -c 9-24)
 
 # 兼容保活 .env 里的 TELEGRAM_* 变量名
 export CHAT_ID=${CHAT_ID:-${TELEGRAM_CHAT_ID:-''}}
