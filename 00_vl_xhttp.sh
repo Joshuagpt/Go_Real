@@ -13,15 +13,25 @@ reading() { read -p "$(red "$1")" "$2"; }
 export LC_ALL=C
 HOSTNAME=$(hostname)
 USERNAME=$(whoami | tr '[:upper:]' '[:lower:]')
-export UUID=${UUID:-$(echo -n "$USERNAME+$HOSTNAME" | md5sum | head -c 32 | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')}
+
+# === UUID 模式 ===
+if [[ -n "${FIXED_UUID}" ]]; then
+    export UUID="${FIXED_UUID}"
+else
+    export UUID=${UUID:-$(echo -n "$USERNAME+$HOSTNAME" | md5sum | head -c 32 | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')}
+fi
+
 export ARGO_DOMAIN=${ARGO_DOMAIN:-''}       
 export ARGO_AUTH=${ARGO_AUTH:-''}           
 export CFIP=${CFIP:-'ali.ztyawc.de'}      
 export CFPORT=${CFPORT:-'443'}               
 export SUB_TOKEN=${SUB_TOKEN:-${UUID:0:8}}
-# 新增：Argo 隧道协议，默认 quic，可设置为 http2
 export ARGO_PROTOCOL=${ARGO_PROTOCOL:-'quic'}
-# 兼容保活 .env 里的 TELEGRAM_* 变量名，避免经保活重启后 Telegram 配置被清空
+
+# === Path 固定（从 UUID 截取 16 位）===
+XHTTP_PATH=$(echo -n "$UUID" | cut -c 9-24)
+
+# 兼容保活 .env 里的 TELEGRAM_* 变量名
 export CHAT_ID=${CHAT_ID:-${TELEGRAM_CHAT_ID:-''}}
 export BOT_TOKEN=${BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-''}}
 export UPLOAD_URL=${UPLOAD_URL:-''}
@@ -39,9 +49,6 @@ rm -rf "$WORKDIR" "$FILE_PATH" && mkdir -p "$WORKDIR" "$FILE_PATH" && chmod 777 
 bash -c 'ps aux | grep $(whoami) | grep -v "sshd\|bash\|grep" | awk "{print \$2}" | xargs -r kill -9 >/dev/null 2>&1' >/dev/null 2>&1
 command -v curl &>/dev/null && COMMAND="curl -so" || command -v wget &>/dev/null && COMMAND="wget -qO" || { red "Error: neither curl nor wget found, please install one of them." >&2; exit 1; }
 
-# 生成随机 XHTTP 路径
-XHTTP_PATH=$(echo -n "${UUID}" | md5sum | head -c 16)
-
 check_port () {
   clear
   purple "正在安装中,请稍等..."
@@ -51,7 +58,6 @@ check_port () {
 
   if [[ $tcp_ports -lt 1 ]]; then
       red "没有可用的TCP端口,正在调整..."
-
       if [[ $udp_ports -ge 3 ]]; then
           udp_port_to_delete=$(echo "$port_list" | awk '/udp/ {print $1}' | head -n 1)
           devil port del udp $udp_port_to_delete
@@ -112,13 +118,11 @@ wait
 
 ARCH=$(uname -m) && DOWNLOAD_DIR="." && mkdir -p "$DOWNLOAD_DIR" && FILE_INFO=()
 
-# cloudflared 使用自己编译的版本，始终取 Releases 中标记为 Latest 的那一个
 MY_REPO="https://github.com/Joshuagpt/cloudflared-freebsd/releases/latest/download"
 case "$ARCH" in
   arm|arm64|aarch64) BOT_URL="$MY_REPO/cloudflared-freebsd-arm64" ;;
   *) BOT_URL="$MY_REPO/cloudflared-freebsd-amd64" ;;
 esac
-# xray 使用自己编译的版本，始终取 Releases 中标记为 Latest 的那一个
 XRAY_REPO="https://github.com/Joshuagpt/xray-freebsd/releases/latest/download"
 case "$ARCH" in
   arm|arm64|aarch64) XRAY_ASSET="xray-freebsd-arm64" ;;
@@ -140,7 +144,6 @@ for entry in "${FILE_INFO[@]}"; do
     URL=$(echo "$entry" | cut -d ' ' -f 1)
     RANDOM_NAME=$(generate_random_name)
     NEW_FILENAME="$DOWNLOAD_DIR/$RANDOM_NAME"
-    
     if [ -e "$NEW_FILENAME" ]; then
         green "$NEW_FILENAME already exists, Skipping download"
     else
@@ -158,7 +161,6 @@ for entry in "${FILE_INFO[@]}"; do
 done
 wait
 
-# 校验 xray：sha256 必须与 Releases 中的 SHA256SUMS 一致，且能输出版本号，否则直接退出
 WEB_BIN="$(basename ${FILE_MAP[web]})"
 if ! curl -fL -sS -o SHA256SUMS "$XRAY_REPO/SHA256SUMS"; then
     red "SHA256SUMS 下载失败: $XRAY_REPO/SHA256SUMS"
@@ -181,21 +183,15 @@ if ! "./$WEB_BIN" version >/dev/null 2>&1; then
 fi
 green "$("./$WEB_BIN" version | head -n 1)"
 
-# 校验 cloudflared：文件必须存在、非空且能输出版本号，否则直接退出
 if [ ! -s "$(basename ${FILE_MAP[bot]})" ] || ! "./$(basename ${FILE_MAP[bot]})" --version >/dev/null 2>&1; then
     red "cloudflared 下载或运行失败，请检查: $BOT_URL"
     exit 1
 fi
 
 generate_config() {
-  
   cat > config.json << EOF
 {
-    "log":{
-        "access":"/dev/null",
-        "error":"/dev/null",
-        "loglevel":"none"
-    },
+    "log":{"access":"/dev/null","error":"/dev/null","loglevel":"none"},
     "inbounds":[
         {
           "tag":"xhttp-in",
@@ -203,12 +199,7 @@ generate_config() {
           "listen": "127.0.0.1",
           "protocol": "vless",
             "settings": {
-                "clients": [
-                    {
-                        "id": "${UUID}",
-                        "flow": ""
-                    }
-                ],
+                "clients": [{"id": "${UUID}", "flow": ""}],
                 "decryption": "none"
             },
             "streamSettings": {
@@ -218,27 +209,13 @@ generate_config() {
                     "mode": "auto"
                 }
             },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": ["http", "tls", "quic"],
-                "metadataOnly": false
-            }
+            "sniffing": {"enabled": true,"destOverride":["http","tls","quic"],"metadataOnly":false}
         }
     ],
-    "dns":{
-        "servers":[
-            "https+local://8.8.8.8/dns-query"
-        ]
-    },
+    "dns":{"servers":["https+local://8.8.8.8/dns-query"]},
     "outbounds": [
-        {
-          "protocol": "freedom",
-          "tag": "direct"
-          },
-        {
-          "protocol": "blackhole",
-          "tag": "blocked"
-        }
+        {"protocol": "freedom","tag": "direct"},
+        {"protocol": "blackhole","tag": "blocked"}
     ] 
 }
 EOF
@@ -352,7 +329,6 @@ generate_links() {
   get_name() { if [ "$HOSTNAME" = "s1.ct8.pl" ]; then SERVER="CT8"; else SERVER=$(echo "$HOSTNAME" | cut -d '.' -f 1); fi; echo "$SERVER"; }
   NAME=$(get_name)-${USERNAME}
 
-  # 生成双节点：H2 + H3
   cat > ${FILE_PATH}/${SUB_TOKEN}.log <<EOF
 vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&fp=chrome&type=xhttp&host=${argodomain}&path=%2F${XHTTP_PATH}&mode=auto&alpn=h2#${NAME}-H2-Argo
 vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&fp=chrome&type=xhttp&host=${argodomain}&path=%2F${XHTTP_PATH}&mode=auto&alpn=h3#${NAME}-H3-Argo
@@ -361,11 +337,10 @@ EOF
   cat ${FILE_PATH}/${SUB_TOKEN}.log
   green "\n订阅连接: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}.log \n" 
   green "节点说明："
-  yellow "  1. H2-Argo  →  alpn=h2（兼容性更好）"
-  yellow "  2. H3-Argo  →  alpn=h3（配合 quic 隧道，更接近全 UDP）\n"
+  yellow "  1. H2-Argo  →  alpn=h2（更稳）"
+  yellow "  2. H3-Argo  →  alpn=h3（配合 quic 隧道）\n"
   rm -rf config.json fake_useragent_0.2.0.json ${WORKDIR}/boot.log ${WORKDIR}/tunnel.json ${WORKDIR}/tunnel.yml 
   install_keepalive
-  # 部署完成后发送 Telegram 通知（已配置 CHAT_ID 和 BOT_TOKEN 时）
   if [[ -n "$CHAT_ID" && -n "$BOT_TOKEN" ]]; then
     curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
       -d chat_id="${CHAT_ID}" \
