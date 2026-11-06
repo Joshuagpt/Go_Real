@@ -9,7 +9,7 @@ VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls ht
 <h2>▶ http2</h2>
 
 ```bash
-ARGO_PROTOCOL=http2 UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh) re
+ARGO_PROTOCOL=http2 UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp.sh)
 ```
 
 > 
