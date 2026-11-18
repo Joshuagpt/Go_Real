@@ -36,7 +36,7 @@ fi
 
 export ARGO_DOMAIN=${ARGO_DOMAIN:-''}       
 export ARGO_AUTH=${ARGO_AUTH:-''}           
-export CFIP=${CFIP:-'ali.ztyawc.de'}      
+export CFIP=${CFIP:-'saas.sin.fan'}      
 export CFPORT=${CFPORT:-'443'}               
 export SUB_TOKEN=${SUB_TOKEN:-${UUID:0:8}}
 export ARGO_PROTOCOL=${ARGO_PROTOCOL:-'quic'}
