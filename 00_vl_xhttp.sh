@@ -36,18 +36,10 @@ fi
 
 export ARGO_DOMAIN=${ARGO_DOMAIN:-''}       
 export ARGO_AUTH=${ARGO_AUTH:-''}           
-export CFIP=${CFIP:-'saas.sin.fan'}      
+export CFIP=${CFIP:-'ali.ztyawc.de'}      
 export CFPORT=${CFPORT:-'443'}               
 export SUB_TOKEN=${SUB_TOKEN:-${UUID:0:8}}
 export ARGO_PROTOCOL=${ARGO_PROTOCOL:-'quic'}
-# 双模开关：默认同时启用 H3 直连与 Argo（H2/H3）订阅；可设 ENABLE_H3=0 关闭 H3 直连
-export ENABLE_H3=${ENABLE_H3:-'1'}
-# H3 直连端口：留空时自动复用/申请 Serv00 UDP 端口
-export H3_PORT=${H3_PORT:-''}
-export H3_ADDRESS=${H3_ADDRESS:-''}  # 可手动指定 H3 直连地址；留空时自动检测 IPv4
-# Argo 本机回源端口：仅供 Cloudflared 通过回环地址访问，不申请 Serv00 公网 TCP 端口
-export ARGO_PORT=${ARGO_PORT:-'8001'}
-export PORT="$ARGO_PORT"
 # 保活服务管理接口（/list /stop /restart）的访问令牌，默认沿用 SUB_TOKEN，建议单独设置
 export ADMIN_TOKEN=${ADMIN_TOKEN:-${SUB_TOKEN}}
 # 下载/重启地址均可用环境变量覆盖，便于固定到指定 tag 或 commit；这些值会写入保活的 .env，重启时保持一致
@@ -96,53 +88,41 @@ fi
 
 check_port () {
   clear 2>/dev/null || true
-  purple "正在检查本机 Argo 回源端口与 Serv00 UDP 端口..."
-  if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
-      red "ARGO_PORT=$PORT 无效，请设置为 1-65535 之间的端口。"
-      exit 1
-  fi
-  purple "Argo 本机回源使用 TCP 127.0.0.1:$PORT（不申请公网 TCP 端口）"
+  purple "正在安装中,请稍等..."
+  port_list=$(devil port list)
+  tcp_ports=$(echo "$port_list" | grep -c "tcp")
+  udp_ports=$(echo "$port_list" | grep -c "udp")
 
-  if [[ "$ENABLE_H3" == "1" ]]; then
-      port_list=$(devil port list 2>&1)
-      if [[ -n "$H3_PORT" ]]; then
-          if ! echo "$port_list" | awk -v p="$H3_PORT" 'tolower($0) ~ /udp/ && $1==p {found=1} END{exit !found}'; then
-              red "指定的 H3_PORT=$H3_PORT 不在当前 UDP 端口列表中。"
-              red "请先执行 devil port add udp $H3_PORT，或清空 H3_PORT 让脚本自动选择。"
-              exit 1
-          fi
-          h3_port="$H3_PORT"
-      else
-          h3_port=$(echo "$port_list" | awk 'tolower($0) ~ /udp/ {print $1; exit}')
-          if [[ -z "$h3_port" ]]; then
-              red "当前没有 UDP 端口，正在申请 H3 直连 UDP 端口..."
-              added=false
-              for attempt in {1..20}; do
-                  candidate=$(shuf -i 10000-65535 -n 1)
-                  result=$(devil port add udp "$candidate" 2>&1)
-                  if [[ "$result" == *"Ok"* ]]; then
-                      h3_port="$candidate"
-                      added=true
-                      green "已添加 H3 UDP 端口: $h3_port"
-                      devil binexec on >/dev/null 2>&1
-                      yellow "UDP 端口刚刚添加，请重新连接 SSH 并重新执行脚本，以确保端口配置生效。"
-                      exit 0
-                  fi
-                  yellow "UDP 端口 $candidate 不可用（尝试 ${attempt}/20）"
-              done
-              if [[ "$added" != true ]]; then
-                  red "无法自动申请 UDP 端口。请确认 Serv00 账号允许 UDP 端口，或先手动申请后设置 H3_PORT。"
-                  red "如暂时只部署 Argo，可使用 ENABLE_H3=0 重新运行。"
-                  exit 1
-              fi
-          fi
+  if [[ $tcp_ports -lt 1 ]]; then
+      red "没有可用的TCP端口,正在调整..."
+      if [[ $udp_ports -ge 3 ]]; then
+          udp_port_to_delete=$(echo "$port_list" | awk '/udp/ {print $1}' | head -n 1)
+          devil port del udp $udp_port_to_delete
+          green "已删除udp端口: $udp_port_to_delete"
       fi
-      export H3_PORT="$h3_port"
-      purple "H3 直连使用 UDP 端口: $H3_PORT"
+
+      while true; do
+          tcp_port=$(shuf -i 10000-65535 -n 1)
+          result=$(devil port add tcp $tcp_port 2>&1)
+          if [[ $result == *"Ok"* ]]; then
+              green "已添加TCP端口: $tcp_port"
+              tcp_port1=$tcp_port
+              break
+          else
+              yellow "端口 $tcp_port 不可用，尝试其他端口..."
+          fi
+      done
+
+      green "端口已调整完成, 将断开SSH连接, 请重新连接SSH并重新执行脚本"
+      devil binexec on >/dev/null 2>&1
+      kill -9 $(ps -o ppid= -p $$) >/dev/null 2>&1
   else
-      h3_port=""
-      purple "已关闭 H3 直连，仅部署 Argo 节点。"
+      tcp_ports=$(echo "$port_list" | awk '/tcp/ {print $1}')
+      tcp_port1=$(echo "$tcp_ports" | sed -n '1p')
   fi
+
+  export PORT=$tcp_port1
+  purple "使用tcp端口: $tcp_port1"
 }
 check_port
 
@@ -272,88 +252,37 @@ if [ ! -s "$(basename ${FILE_MAP[bot]})" ] || ! "./$(basename ${FILE_MAP[bot]})"
 fi
 
 generate_config() {
-  # XHTTP-Argo：TCP 本机回环监听，由 Cloudflared 回源
-  # XHTTP-H3：独立 UDP/QUIC 监听，TLS ALPN 仅 h3
-  local inbound_json=""
-  inbound_json=$(cat <<EOF
-    {
-      "tag": "xhttp-argo",
-      "port": ${PORT},
-      "listen": "127.0.0.1",
-      "protocol": "vless",
-      "settings": {
-        "clients": [{"id": "${UUID}", "flow": ""}],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "xhttp",
-        "xhttpSettings": {
-          "path": "/${XHTTP_PATH}",
-          "mode": "auto"
-        }
-      },
-      "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "metadataOnly": false}
-    }
-EOF
-)
-  if [[ "$ENABLE_H3" == "1" && -n "$H3_PORT" ]]; then
-    inbound_json="${inbound_json},$(cat <<EOF
-    {
-      "tag": "xhttp-h3-direct",
-      "listen": "0.0.0.0",
-      "port": ${H3_PORT},
-      "protocol": "vless",
-      "settings": {
-        "clients": [{"id": "${UUID}", "flow": ""}],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "xhttp",
-        "security": "tls",
-        "xhttpSettings": {
-          "path": "/${XHTTP_PATH}",
-          "mode": "auto"
-        },
-        "tlsSettings": {
-          "alpn": ["h3"],
-          "certificates": [{
-            "certificateFile": "${WORKDIR}/h3-cert.pem",
-            "keyFile": "${WORKDIR}/h3-key.pem"
-          }]
-        }
-      },
-      "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "metadataOnly": false}
-    }
-EOF
-)"
-  fi
-
-  cat > config.json <<EOF
+  cat > config.json << EOF
 {
-  "log": {"access": "/dev/null", "error": "${WORKDIR}/xray-error.log", "loglevel": "warning"},
-  "inbounds": [${inbound_json}],
-  "dns": {"servers": ["https+local://8.8.8.8/dns-query"]},
-  "outbounds": [
-    {"protocol": "freedom", "tag": "direct"},
-    {"protocol": "blackhole", "tag": "blocked"}
-  ]
+    "log":{"access":"/dev/null","error":"/dev/null","loglevel":"none"},
+    "inbounds":[
+        {
+          "tag":"xhttp-in",
+          "port": ${PORT},
+          "listen": "127.0.0.1",
+          "protocol": "vless",
+            "settings": {
+                "clients": [{"id": "${UUID}", "flow": ""}],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "xhttp",
+                "xhttpSettings": {
+                    "path": "/${XHTTP_PATH}",
+                    "mode": "auto"
+                }
+            },
+            "sniffing": {"enabled": true,"destOverride":["http","tls","quic"],"metadataOnly":false}
+        }
+    ],
+    "dns":{"servers":["https+local://8.8.8.8/dns-query"]},
+    "outbounds": [
+        {"protocol": "freedom","tag": "direct"},
+        {"protocol": "blackhole","tag": "blocked"}
+    ] 
 }
 EOF
 }
-
-if [[ "$ENABLE_H3" == "1" && -n "$H3_PORT" ]]; then
-    mkdir -p "$WORKDIR"
-    if [[ ! -s "$WORKDIR/h3-cert.pem" || ! -s "$WORKDIR/h3-key.pem" ]]; then
-        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-            -keyout "$WORKDIR/h3-key.pem" -out "$WORKDIR/h3-cert.pem" \
-            -days 3650 -nodes -subj "/CN=bing.com" >/dev/null 2>&1 || {
-                red "H3 自签证书生成失败"
-                exit 1
-            }
-        chmod 600 "$WORKDIR/h3-key.pem" "$WORKDIR/h3-cert.pem"
-    fi
-fi
-
 generate_config
 wait
 
@@ -432,10 +361,6 @@ TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
 ARGO_DOMAIN=${ARGO_DOMAIN}
 ARGO_AUTH=$([[ -z "$ARGO_AUTH" ]] && echo "" || ([[ "$ARGO_AUTH" =~ ^\{.* ]] && echo "'$ARGO_AUTH'" || echo "$ARGO_AUTH"))
 ARGO_PROTOCOL=${ARGO_PROTOCOL}
-ARGO_PORT=${ARGO_PORT}
-ENABLE_H3=${ENABLE_H3}
-H3_PORT=${H3_PORT}
-H3_ADDRESS=${H3_ADDRESS}
 XHTTP_PATH=${XHTTP_PATH}
 ADMIN_TOKEN=${ADMIN_TOKEN}
 XRAY_REPO=${XRAY_REPO}
@@ -491,36 +416,16 @@ generate_links() {
   get_name() { if [ "$HOSTNAME" = "s1.ct8.pl" ]; then SERVER="CT8"; else SERVER=$(echo "$HOSTNAME" | cut -d '.' -f 1); fi; echo "$SERVER"; }
   NAME=$(get_name)-${USERNAME}
 
-  : > "${FILE_PATH}/${SUB_TOKEN}.log"
-  {
-    echo "vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&fp=chrome&type=xhttp&host=${argodomain}&path=%2F${XHTTP_PATH}&mode=auto&alpn=h2#${NAME}-H2-Argo"
-    echo "vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&fp=chrome&type=xhttp&host=${argodomain}&path=%2F${XHTTP_PATH}&mode=auto&alpn=h3#${NAME}-H3-Argo"
-  } >> "${FILE_PATH}/${SUB_TOKEN}.log"
-
-  if [[ "$ENABLE_H3" == "1" && -n "$H3_PORT" ]]; then
-      h3_server_ip="$H3_ADDRESS"
-      if [[ -z "$h3_server_ip" ]]; then
-          h3_server_ip=$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || curl -4 -fsS --max-time 8 https://ip.sb 2>/dev/null)
-      fi
-      if [[ "$h3_server_ip" == *:* ]]; then
-          h3_server_ip="[${h3_server_ip}]"
-      fi
-      if [[ -n "$h3_server_ip" ]]; then
-          echo "vless://${UUID}@${h3_server_ip}:${H3_PORT}?encryption=none&security=tls&sni=bing.com&fp=chrome&type=xhttp&path=%2F${XHTTP_PATH}&mode=auto&alpn=h3&allowInsecure=1#${NAME}-H3-Direct" >> "${FILE_PATH}/${SUB_TOKEN}.log"
-      else
-          yellow "未能自动获取服务器公网 IP，H3 直连节点未写入订阅。"
-      fi
-  fi
+  cat > ${FILE_PATH}/${SUB_TOKEN}.log <<EOF
+vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&fp=chrome&type=xhttp&host=${argodomain}&path=%2F${XHTTP_PATH}&mode=auto&alpn=h2#${NAME}-H2-Argo
+vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argodomain}&fp=chrome&type=xhttp&host=${argodomain}&path=%2F${XHTTP_PATH}&mode=auto&alpn=h3#${NAME}-H3-Argo
+EOF
 
   cat ${FILE_PATH}/${SUB_TOKEN}.log
   green "\n订阅连接: https://${USERNAME}.${CURRENT_DOMAIN}/${SUB_TOKEN}.log \n" 
   green "节点说明："
-  yellow "  1. H2-Argo      → 客户端到 Cloudflare 使用 H2/TCP 443"
-  yellow "  2. H3-Argo      → 客户端到 Cloudflare 使用 H3/UDP 443"
-  if [[ "$ENABLE_H3" == "1" && -n "$H3_PORT" ]]; then
-      yellow "  3. H3-Direct    → 客户端直连服务器 UDP ${H3_PORT}（自签证书，allowInsecure=1）"
-  fi
-  yellow "  Argo 回源：TCP 127.0.0.1:${PORT}（本地端口，无需申请公网 TCP）；Cloudflared 隧道协议：${ARGO_PROTOCOL}\n"
+  yellow "  1. H2-Argo  →  alpn=h2（更稳）"
+  yellow "  2. H3-Argo  →  alpn=h3（客户端到 CF 边缘走 HTTP/3，与隧道协议 ${ARGO_PROTOCOL} 无关，需客户端网络放行 UDP）\n"
   if [[ -z "$ARGO_AUTH" ]]; then
     yellow "注意：当前为 quick tunnel（trycloudflare 临时域名），每次重启域名都会变化，已导入的节点会失效，需重新拉取订阅。长期使用请配置 ARGO_DOMAIN + ARGO_AUTH 固定隧道。\n"
   fi
@@ -529,7 +434,7 @@ generate_links() {
   if [[ -n "$CHAT_ID" && -n "$BOT_TOKEN" ]]; then
     curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
       -d chat_id="${CHAT_ID}" \
-      --data-urlencode text="✅ ${NAME} XHTTP-Argo(${ARGO_PROTOCOL})${ENABLE_H3:+ + H3-Direct} 服务已重新部署完成$([[ -z "$ARGO_AUTH" ]] && printf '\n当前 quick tunnel 域名: %s（重启后会变化）' "$argodomain")" >/dev/null 2>&1
+      --data-urlencode text="✅ ${NAME} XHTTP+Argo(${ARGO_PROTOCOL}) 服务已重新部署完成$([[ -z "$ARGO_AUTH" ]] && printf '\n当前 quick tunnel 域名: %s（重启后会变化）' "$argodomain")" >/dev/null 2>&1
   fi
 }
 generate_links
