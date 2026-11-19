@@ -1,7 +1,7 @@
 <h2>✅ Named Tunnel</h2>
 
 ```bash
-VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp_argo.sh)
+UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp_argo.sh)
 ```
 
 > 
@@ -9,7 +9,7 @@ VLESS_PORT="..." UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls ht
 <h2>▶ http2</h2>
 
 ```bash
-ARGO_PROTOCOL=http2 UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp.sh)
+ARGO_PROTOCOL=http2 UUID="..." ARGO_DOMAIN="..." ARGO_AUTH="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp_argo.sh)
 ```
 
 > 
@@ -25,23 +25,16 @@ bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/sb_serv
 <h2>▶ Xhttp</h2>
 
 ```bash
-UUID="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp.sh)
+UUID="..." ENABLE_H3=1 bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp.sh)
 ```
 
 >
 
-<h2>▶ Warp</h2>
-
-```bash
-WARP="1" bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh)
-```
-
->
 
 <h2>✅ Quick Tunnel</h2>
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp_argo.sh)
 ```
 
 > 
@@ -49,7 +42,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real
 <h2>▶ TG Bot</h2>          
 
 ```bash
-TG_TOKEN="..." TG_ID="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/Go_Real.sh)
+TG_TOKEN="..." TG_ID="..." bash <(curl -Ls https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp.sh)
 ```
 
 > 
