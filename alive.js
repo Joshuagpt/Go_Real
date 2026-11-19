@@ -154,6 +154,7 @@ async function monitorServices() {
           httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }),
           timeout: 10000
         });
+        // 兼容返回字符串或 JSON 对象两种情况
         const data = res.data;
         const text = typeof data === 'string' ? data : JSON.stringify(data || {});
         if (text.includes('running')) {
