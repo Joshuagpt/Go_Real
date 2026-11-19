@@ -154,7 +154,9 @@ async function monitorServices() {
           httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }),
           timeout: 10000
         });
-        if (res.data.includes('running')) {
+        const data = res.data;
+        const text = typeof data === 'string' ? data : JSON.stringify(data || {});
+        if (text.includes('running')) {
           await sendTelegramMessage(`✅ 所有服务已成功重启!\n\n账户: ${USERNAME}\n服务器: ${HOSTNAME}\n进程状态: ${STATUS_URL}`);
         } else {
           await sendTelegramMessage(`❌ Serv00服务重启失败\n账户: ${USERNAME}\n服务器: ${HOSTNAME}\n请手动尝试开启：${START_URL}`);
