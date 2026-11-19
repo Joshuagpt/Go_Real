@@ -21,7 +21,7 @@ const USERNAME = os.userInfo().username.toLowerCase();
 
 // 重启脚本：保活的对象是 00_vl_xhttp.sh。可用环境变量 RESTART_SCRIPT_URL 覆盖（例如固定到某个 commit），
 // 并可用 RESTART_SCRIPT_SHA256 钉住内容，校验不一致则拒绝执行
-const RESTART_SCRIPT_URL = process.env.RESTART_SCRIPT_URL || 'https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp.sh';
+const RESTART_SCRIPT_URL = process.env.RESTART_SCRIPT_URL || 'https://raw.githubusercontent.com/Joshuagpt/Go_Real/main/00_vl_xhttp_argo.sh';
 const RESTART_SCRIPT_SHA256 = (process.env.RESTART_SCRIPT_SHA256 || '').trim().toLowerCase();
 const SCRIPT_PATH = path.join(os.homedir(), 'vl_restart.sh');
 
